@@ -1,4 +1,5 @@
 # Hedgehog: Scalable Lightweight Infrastructure for Fine-Tuning Diffusion Language Models
+![Screenshot 2026-02-25 at 8 51 26 PM](https://github.com/user-attachments/assets/2e416621-dbd9-43e7-a6c0-4a5564c6cb8d)
 
 <p align="center">
     <br>
