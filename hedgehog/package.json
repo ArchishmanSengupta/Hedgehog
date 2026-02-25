@@ -1,0 +1,23 @@
+{
+  "name": "hedgehog-cli",
+  "version": "1.0.0",
+  "description": "Animated ASCII Hedgehog for CLI",
+  "main": "dist/hedgehog-animator.js",
+  "bin": {
+    "hedgehog": "./bin/hedgehog-cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "ts-node bin/hedgehog-cli.ts",
+    "hedgehog": "node bin/hedgehog-cli.js"
+  },
+  "keywords": ["cli", "ascii", "animation", "hedgehog"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {}
+}
