@@ -10,9 +10,11 @@
 <p align="center">
 <img src="https://img.shields.io/badge/python-3.10+-5be.svg">
 <img src="https://img.shields.io/badge/pytorch-%E2%89%A52.0-orange.svg">
-<a href="https://pypi.org/project/hedgehog/"><img src="https://badge.fury.io/py/hedgehog.svg"></a>
+<a href="https://pypi.org/project/hedgehog-dlm/"><img src="https://badge.fury.io/py/hedgehog-dlm.svg"></a>
 <a href="https://github.com/ArchishmanSengupta/Hedgehog/blob/main/LICENSE"><img src="https://img.shields.io/github/license/ArchishmanSengupta/Hedgehog"></a>
+<a href="https://github.com/ArchishmanSengupta/Hedgehog/stargazers"><img src="https://img.shields.io/github/stars/ArchishmanSengupta/Hedgehog"></a>
 </p>
+
 
 ## Table of Contents
 
@@ -499,3 +501,7 @@ Hedgehog is inspired by:
 - [Hugging Face](https://huggingface.co) - For transformers and datasets libraries
 
 ---
+
+### Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=ArchishmanSengupta/Hedgehog&type=Date)](https://star-history.com/#ArchishmanSengupta/Hedgehog)
