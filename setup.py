@@ -23,14 +23,14 @@ def get_requirements():
     return []
 
 setup(
-    name="hedgehog",
+    name="hedgehog-dlm",
     version=get_version(),
     author="ArchishmanSengupta",
     author_email="senguptaarchie@gmail.com",
     description="A lightweight framework for training and fine-tuning Diffusion Language Models",
     long_description=open("README.md", "r", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
-    url="https://github.com/hedgehog-dlm/hedgehog",
+    url="https://github.com/ArchishmanSengupta/Hedgehog",
     packages=find_packages(exclude=["tests", "examples"]),
     classifiers=[
         "Development Status :: 3 - Alpha",
@@ -41,9 +41,8 @@ setup(
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
-        "Topic :: Scientific/Engineering :: Artificial Intelligence",
-        "Topic :: Scientific/Engineering :: Machine Learning",
     ],
+    license="Apache-2.0",
     python_requires=">=3.10",
     install_requires=get_requirements(),
     extras_require={

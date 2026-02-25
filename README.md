@@ -10,7 +10,7 @@
 <img src="https://img.shields.io/badge/python-3.10+-5be.svg">
 <img src="https://img.shields.io/badge/pytorch-%E2%89%A52.0-orange.svg">
 <a href="https://pypi.org/project/hedgehog/"><img src="https://badge.fury.io/py/hedgehog.svg"></a>
-<a href="https://github.com/ArchishmanSengupta/hedgehog/blob/main/LICENSE"><img src="https://img.shields.io/github/license/hedgehog/hedgehog"></a>
+<a href="https://github.com/ArchishmanSengupta/Hedgehog/blob/main/LICENSE"><img src="https://img.shields.io/github/license/ArchishmanSengupta/Hedgehog"></a>
 </p>
 
 ## Table of Contents
@@ -89,12 +89,12 @@ Diffusion Language Models represent a new paradigm in generative AI, where text 
 
 ### From PyPI (Coming Soon)
 ```shell
-pip install hedgehog
+pip install hedgehog-dlm
 ```
 
 ### From Source
 ```shell
-git clone https://github.com/ArchishmanSengupta/hedgehog.git
+git clone https://github.com/ArchishmanSengupta/Hedgehog.git
 cd hedgehog
 pip install -e .
 ```
@@ -153,6 +153,66 @@ hedgehog serve \
     --checkpoint output/final_model.pt \
     --port 8000 \
     --backend transformers
+```
+
+## Training on Apple Silicon (Mac Mini, MacBook, etc.)
+
+Hedgehog supports training on Apple Silicon using the MPS (Metal Performance Shaders) backend.
+
+### Installation
+
+```bash
+# Create a virtual environment
+python3 -m venv ~/hedgehog-env
+source ~/hedgehog-env/bin/activate
+
+# Install hedgehog-dlm
+pip install hedgehog-dlm
+```
+
+### Training on Mac Mini (16GB RAM)
+
+For memory-constrained devices, use a smaller model with LoRA:
+
+```bash
+hedgehog train \
+    --model_type dit \
+    --dataset tiny-shakespeare \
+    --use_peft \
+    --peft_type lora \
+    --lora_r 4 \
+    --num_train_epochs 3 \
+    --learning_rate 1e-4 \
+    --per_device_batch_size 1 \
+    --max_seq_len 128 \
+    --gradient_accumulation_steps 8 \
+    --hidden_size 256 \
+    --num_layers 6 \
+    --device mps \
+    --output_dir output
+```
+
+### Memory-Efficient Tips
+
+| Argument | Description | Recommended for 16GB |
+|----------|-------------|---------------------|
+| `--per_device_batch_size` | Batch size per device | 1 |
+| `--max_seq_len` | Sequence length | 128 |
+| `--hidden_size` | Model hidden size | 256 |
+| `--num_layers` | Number of layers | 6 |
+| `--gradient_accumulation_steps` | Effective batch size | 8 |
+| `--device` | Device to use | `mps` |
+
+### Minimal Training Command
+
+```bash
+hedgehog train \
+    --dataset tiny-shakespeare \
+    --use_peft \
+    --per_device_batch_size 1 \
+    --max_seq_len 128 \
+    --device mps \
+    --output_dir output
 ```
 
 ## Architecture
@@ -425,7 +485,7 @@ If you use Hedgehog in your research, please cite:
   title = {Hedgehog: Scalable Lightweight Infrastructure for Fine-Tuning Diffusion Language Models},
   author = {ArchishmanSengupta},
   year = {2025},
-  url = {https://github.com/ArchishmanSengupta/hedgehog}
+  url = {https://github.com/ArchishmanSengupta/Hedgehog}
 }
 ```
 
