@@ -52,7 +52,7 @@ Please be respectful and constructive. We follow the [Contributor Covenant](http
 
 ```bash
 # Clone the repository
-git clone https://github.com/hedgehog-dlm/hedgehog.git
+git clone https://github.com/ArchishmanSengupta/hedgehog.git
 cd hedgehog
 
 # Create virtual environment
@@ -88,4 +88,4 @@ pytest tests/
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the Apache License 2.0.
+By contributing, you agree that your contributions will be licensed under the MIT License.
