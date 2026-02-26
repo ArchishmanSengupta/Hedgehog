@@ -36,6 +36,12 @@ class TrainerConfig:
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
     warmup_steps: int = 500
+    lr_scheduler_type: str = "linear"  # linear, cosine, constant
+    min_lr: float = 1e-6  # Minimum learning rate for cosine scheduler
+
+    # Mixed precision
+    use_amp: bool = False  # Automatic mixed precision
+    amp_dtype: str = "float16"  # float16 or bfloat16
 
     # Model architecture
     hidden_size: int = 384
@@ -91,6 +97,12 @@ class Trainer:
         # Setup device
         self.device = self._setup_device(config.device)
 
+        # Setup AMP (Automatic Mixed Precision)
+        self.scaler = None
+        if config.use_amp and self.device.type == "cuda":
+            self.scaler = torch.cuda.amp.GradScaler()
+            logger.info("Using automatic mixed precision (AMP)")
+
         # Initialize model if not provided
         if model is None:
             from ..models import create_model
@@ -132,6 +144,7 @@ class Trainer:
         self.global_step = 0
         self.epoch = 0
         self.best_metric = float('inf')
+        self.loss_scale = 1.0  # For gradient accumulation
 
         # Output directory
         self.output_dir = Path(config.output_dir)
@@ -192,17 +205,48 @@ class Trainer:
             lr=self.config.learning_rate,
         )
 
-        # Scheduler
+        # Scheduler - support different types
         total_steps = self._get_total_steps()
-        self.scheduler = torch.optim.lr_scheduler.LinearLR(
-            self.optimizer,
-            start_factor=0.1,
-            end_factor=1.0,
-            total_iters=min(self.config.warmup_steps, total_steps),
-        )
+        warmup_steps = min(self.config.warmup_steps, total_steps)
+
+        if self.config.lr_scheduler_type == "cosine":
+            # Cosine scheduler with warmup
+            self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer,
+                T_max=total_steps - warmup_steps,
+                eta_min=self.config.min_lr,
+            )
+            # Add warmup phase
+            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+                self.optimizer,
+                start_factor=0.1,
+                end_factor=1.0,
+                total_iters=warmup_steps,
+            )
+            from torch.optim.lr_scheduler import SequentialLR
+            self.scheduler = SequentialLR(
+                self.optimizer,
+                schedulers=[warmup_scheduler, self.scheduler],
+                milestones=[warmup_steps],
+            )
+        elif self.config.lr_scheduler_type == "constant":
+            self.scheduler = torch.optim.lr_scheduler.LinearLR(
+                self.optimizer,
+                start_factor=1.0,
+                end_factor=1.0,
+                total_iters=total_steps,
+            )
+        else:  # linear
+            self.scheduler = torch.optim.lr_scheduler.LinearLR(
+                self.optimizer,
+                start_factor=0.1,
+                end_factor=1.0,
+                total_iters=warmup_steps,
+            )
 
         logger.info(f"Training device: {self.device}")
         logger.info(f"Total training steps: {total_steps}")
+        logger.info(f"Learning rate scheduler: {self.config.lr_scheduler_type}")
 
     def _get_total_steps(self) -> int:
         """Calculate total training steps."""
@@ -239,31 +283,54 @@ class Trainer:
         return loss
 
     def training_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
-        """Single training step."""
+        """Single training step with gradient accumulation and AMP support."""
         self.model.train()
 
-        # Forward pass
-        loss = self.compute_loss(batch)
+        # Forward pass with optional AMP
+        if self.scaler is not None:
+            with torch.cuda.amp.autocast():
+                loss = self.compute_loss(batch)
+                loss = loss / self.config.gradient_accumulation_steps
 
-        # Backward pass
-        loss.backward()
+            # Backward pass with scaler
+            self.scaler.scale(loss).backward()
+        else:
+            loss = self.compute_loss(batch)
+            loss = loss / self.config.gradient_accumulation_steps
 
-        # Gradient clipping
-        if self.config.max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(
-                self.model.parameters(),
-                self.config.max_grad_norm,
-            )
+            # Backward pass
+            loss.backward()
 
-        # Optimizer step
-        self.optimizer.step()
-        self.optimizer.zero_grad()
+        # Accumulate gradients
+        self.loss_scale += 1
 
-        # Scheduler step
-        if self.scheduler is not None and self.global_step < self.config.warmup_steps:
-            self.scheduler.step()
+        # Perform optimizer step when accumulation is complete
+        if self.loss_scale >= self.config.gradient_accumulation_steps:
+            # Gradient clipping
+            if self.config.max_grad_norm > 0:
+                if self.scaler is not None:
+                    self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    self.config.max_grad_norm,
+                )
 
-        return {"loss": loss.item()}
+            # Optimizer step
+            if self.scaler is not None:
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                self.optimizer.step()
+
+            # Zero gradients
+            self.optimizer.zero_grad()
+            self.loss_scale = 1
+
+            # Scheduler step (now runs after each effective batch)
+            if self.scheduler is not None:
+                self.scheduler.step()
+
+        return {"loss": loss.item() * self.config.gradient_accumulation_steps}
 
     def evaluation(self) -> Dict[str, float]:
         """Run evaluation."""
