@@ -417,7 +417,7 @@ def create_peft_model(
 
     Args:
         base_model: Base model to apply PEFT to
-        peft_type: Type of PEFT: lora, lora_plus, dora, ia3, prefix, prompt
+        peft_type: Type of PEFT: lora, dora, ia3, prefix, prompt
         **kwargs: Additional arguments for PEFT config
 
     Returns:
@@ -472,7 +472,15 @@ class PrefixTuningModel(nn.Module):
         super().__init__()
         self.base_model = base_model
         hidden_size = getattr(base_model, 'hidden_size', 384)
-        num_layers = getattr(base_model, 'config', type('obj', (object,), {'num_layers': 12}))().num_layers
+
+        # Get num_layers from model config or fallback to default
+        num_layers = 12
+        if hasattr(base_model, 'config') and base_model.config is not None:
+            if hasattr(base_model.config, 'num_layers'):
+                num_layers = base_model.config.num_layers
+            elif hasattr(base_model.config, 'num_hidden_layers'):
+                num_layers = base_model.config.num_hidden_layers
+
         self.prefix_tuning = PrefixTuning(
             hidden_size=hidden_size,
             prefix_length=prefix_length,
