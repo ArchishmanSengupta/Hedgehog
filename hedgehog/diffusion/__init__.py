@@ -270,15 +270,17 @@ def create_diffusion(
     """Factory function to create diffusion processes."""
     diffusion_map = {
         "mdlm": MDLMDiffusion,
+        "d3pm": MDLMDiffusion,  # d3pm defaults to mdlm-style for simplicity
         "d3pm_absorbing": lambda vs, nt, sc: D3PMDiffusion(
             vs, DiffusionType.D3PM_ABSORBING, nt, sc, "absorbing"
         ),
         "d3pm_uniform": lambda vs, nt, sc: D3PMDiffusion(
             vs, DiffusionType.D3PM_UNIFORM, nt, sc, "uniform"
         ),
+        "sedd": MDLMDiffusion,  # SEDD uses same process as MDLM
     }
 
     if diffusion_type not in diffusion_map:
-        raise ValueError(f"Unknown diffusion type: {diffusion_type}")
+        raise ValueError(f"Unknown diffusion type: {diffusion_type}. Available: {list(diffusion_map.keys())}")
 
     return diffusion_map[diffusion_type](vocab_size, num_timesteps, schedule)
