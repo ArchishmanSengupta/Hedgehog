@@ -52,7 +52,6 @@ Diffusion Language Models represent a new paradigm in generative AI, where text 
   - IA3 (Infusion of Adapter for Attention)
   - Prefix Tuning
   - Prompt Tuning
-  - LoRA+
 
 ### Distributed Training
 - **Data Parallelism (DP)**: Multi-GPU data parallel training
@@ -67,7 +66,7 @@ Diffusion Language Models represent a new paradigm in generative AI, where text 
 - **GPTQ**: GPTQ quantization
 - **HQQ**: Hugging Face Quantization
 - **EETQ**: Efficiently Entangled Tensor Quantization
-- **FP8**: 8-bit floating point
+- **AQLM**: Additive Quantization
 
 ### Inference Backends
 - **Transformers**: Native PyTorch inference
@@ -259,7 +258,6 @@ See the `examples/` directory for comprehensive training examples:
 
 - `examples/train/full/` - Full parameter training
 - `examples/train/lora/` - LoRA fine-tuning
-- `examples/train/qlora/` - QLoRA training
 - `examples/infer/` - Inference examples
 
 ### Training Configuration
@@ -270,8 +268,8 @@ from hedgehog.trainers import TrainerConfig, DiffusionTrainer
 config = TrainerConfig(
     model_type="dit",
     vocab_size=32768,
-    hidden_size=768,
-    num_heads=12,
+    hidden_size=384,
+    num_heads=6,
     num_layers=12,
     max_seq_len=512,
     diffusion_type="mdlm",
@@ -404,7 +402,6 @@ hedgehog train \
     --peft_type lora \
     --lora_r 16 \
     --lora_alpha 32 \
-    --target_modules all-linear \
     --num_train_epochs 3 \
     --per_device_batch_size 4 \
     --learning_rate 1e-4 \
@@ -484,10 +481,10 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 If you use Hedgehog in your research, please cite:
 
 ```bibtex
-@software{hedgehog2025,
+@software{hedgehog2026,
   title = {Hedgehog: Scalable Lightweight Infrastructure for Fine-Tuning Diffusion Language Models},
   author = {ArchishmanSengupta},
-  year = {2025},
+  year = {2026},
   url = {https://github.com/ArchishmanSengupta/Hedgehog}
 }
 ```
