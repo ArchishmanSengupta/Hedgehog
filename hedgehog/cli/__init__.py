@@ -121,6 +121,14 @@ def add_train_args(parser: argparse.ArgumentParser):
                         help="Maximum gradient norm")
     parser.add_argument("--warmup_steps", type=int, default=500,
                         help="Warmup steps")
+    parser.add_argument("--lr_scheduler", type=str, default="linear",
+                        help="Learning rate scheduler: linear, cosine, constant")
+    parser.add_argument("--min_lr", type=float, default=1e-6,
+                        help="Minimum learning rate for cosine scheduler")
+    parser.add_argument("--use_amp", action="store_true",
+                        help="Use automatic mixed precision (AMP)")
+    parser.add_argument("--amp_dtype", type=str, default="float16",
+                        help="AMP dtype: float16, bfloat16")
 
     # Diffusion
     parser.add_argument("--diffusion_type", type=str, default="mdlm",
@@ -192,6 +200,8 @@ def add_sample_args(parser: argparse.ArgumentParser):
                         help="Sequence length to generate")
     parser.add_argument("--sampler", type=str, default="ddpm_cache",
                         help="Sampler type: ddpm, ddpm_cache, analytic, semi_ar, blockwise")
+    parser.add_argument("--diffusion_type", type=str, default="mdlm",
+                        help="Diffusion type: mdlm, d3pm, d3pm_absorbing, d3pm_uniform, sedd")
 
     # Output
     parser.add_argument("--output", type=str, default="samples.txt",
@@ -219,6 +229,8 @@ def add_eval_args(parser: argparse.ArgumentParser):
                         help="Number of layers")
     parser.add_argument("--max_seq_len", type=int, default=512,
                         help="Maximum sequence length")
+    parser.add_argument("--diffusion_type", type=str, default="mdlm",
+                        help="Diffusion type: mdlm, d3pm, d3pm_absorbing, d3pm_uniform, sedd")
 
     # Dataset
     parser.add_argument("--dataset", type=str, required=True,
@@ -415,6 +427,10 @@ def run_train(args: argparse.Namespace):
         weight_decay=args.weight_decay,
         max_grad_norm=args.max_grad_norm,
         warmup_steps=args.warmup_steps,
+        lr_scheduler_type=args.lr_scheduler,
+        min_lr=args.min_lr,
+        use_amp=args.use_amp,
+        amp_dtype=args.amp_dtype,
         diffusion_type=args.diffusion_type,
         num_timesteps=args.num_timesteps,
         noise_schedule=args.noise_schedule,
@@ -474,7 +490,7 @@ def run_sample(args: argparse.Namespace):
 
     # Create diffusion
     diffusion = create_diffusion(
-        diffusion_type="mdlm",
+        diffusion_type=args.diffusion_type,
         vocab_size=args.vocab_size,
         num_timesteps=1000,
     )
@@ -490,6 +506,14 @@ def run_sample(args: argparse.Namespace):
         mask_token_id=mask_token_id,
     )
 
+    # Try to load tokenizer for decoding
+    tokenizer = None
+    try:
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(args.dataset if hasattr(args, 'dataset') else "gpt2")
+    except:
+        logger.warning("Could not load tokenizer, outputs will be token IDs")
+
     # Generate samples
     logger.info(f"Generating {args.num_samples} samples...")
     samples = sampler.sample(
@@ -502,7 +526,10 @@ def run_sample(args: argparse.Namespace):
     logger.info(f"Saving samples to {args.output}")
     with open(args.output, "w") as f:
         for i, sample in enumerate(samples):
-            text = tokenizer.decode(sample.tolist()) if hasattr(tokenizer, 'decode') else str(sample.tolist())
+            if tokenizer is not None:
+                text = tokenizer.decode(sample.tolist(), skip_special_tokens=True)
+            else:
+                text = str(sample.tolist())
             f.write(f"Sample {i+1}: {text}\n")
 
     logger.info("Sampling complete!")
@@ -542,7 +569,7 @@ def run_eval(args: argparse.Namespace):
 
     # Create diffusion
     diffusion = create_diffusion(
-        diffusion_type="mdlm",
+        diffusion_type=args.diffusion_type,
         vocab_size=args.vocab_size,
         num_timesteps=1000,
     )
