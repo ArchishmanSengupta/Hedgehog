@@ -125,10 +125,16 @@ def add_train_args(parser: argparse.ArgumentParser):
                         help="Learning rate scheduler: linear, cosine, constant")
     parser.add_argument("--min_lr", type=float, default=1e-6,
                         help="Minimum learning rate for cosine scheduler")
+    parser.add_argument("--warmup_start_factor", type=float, default=0.1,
+                        help="Warmup starting LR factor (multiplier of learning rate)")
+    parser.add_argument("--warmup_end_factor", type=float, default=1.0,
+                        help="Warmup ending LR factor (multiplier of learning rate)")
     parser.add_argument("--use_amp", action="store_true",
                         help="Use automatic mixed precision (AMP)")
     parser.add_argument("--amp_dtype", type=str, default="float16",
                         help="AMP dtype: float16, bfloat16")
+    parser.add_argument("--mask_token_id", type=int, default=None,
+                        help="Mask token ID for diffusion (defaults to vocab_size - 1)")
 
     # Diffusion
     parser.add_argument("--diffusion_type", type=str, default="mdlm",
@@ -427,10 +433,13 @@ def run_train(args: argparse.Namespace):
         weight_decay=args.weight_decay,
         max_grad_norm=args.max_grad_norm,
         warmup_steps=args.warmup_steps,
+        warmup_start_factor=args.warmup_start_factor,
+        warmup_end_factor=args.warmup_end_factor,
         lr_scheduler_type=args.lr_scheduler,
         min_lr=args.min_lr,
         use_amp=args.use_amp,
         amp_dtype=args.amp_dtype,
+        mask_token_id=args.mask_token_id,
         diffusion_type=args.diffusion_type,
         num_timesteps=args.num_timesteps,
         noise_schedule=args.noise_schedule,

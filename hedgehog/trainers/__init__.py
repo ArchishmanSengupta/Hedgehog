@@ -36,6 +36,8 @@ class TrainerConfig:
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
     warmup_steps: int = 500
+    warmup_start_factor: float = 0.1  # Starting LR multiplier for warmup
+    warmup_end_factor: float = 1.0  # Ending LR multiplier after warmup
     lr_scheduler_type: str = "linear"  # linear, cosine, constant
     min_lr: float = 1e-6  # Minimum learning rate for cosine scheduler
 
@@ -49,6 +51,7 @@ class TrainerConfig:
     num_layers: int = 12
     max_seq_len: int = 512
     dropout: float = 0.1
+    mask_token_id: Optional[int] = None  # Mask token ID (defaults to vocab_size - 1)
 
     # Diffusion
     diffusion_type: str = "mdlm"
@@ -69,6 +72,8 @@ class TrainerConfig:
     seed: int = 42
     dataloader_num_workers: int = 4
     resume_from_checkpoint: Optional[str] = None
+    fp16: bool = False  # Legacy option for AMP (use use_amp instead)
+    bf16: bool = False  # Legacy option for AMP (use use_amp and amp_dtype instead)
 
 
 class Trainer:
@@ -129,8 +134,8 @@ class Trainer:
             schedule=config.noise_schedule,
         )
 
-        # Get mask token id (last token is typically mask)
-        self.mask_token_id = config.vocab_size - 1
+        # Get mask token id (last token is typically mask, but can be customized)
+        self.mask_token_id = config.mask_token_id if config.mask_token_id is not None else config.vocab_size - 1
 
         # Setup datasets
         self.train_dataset = train_dataset
@@ -219,8 +224,8 @@ class Trainer:
             # Add warmup phase
             warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
                 self.optimizer,
-                start_factor=0.1,
-                end_factor=1.0,
+                start_factor=self.config.warmup_start_factor,
+                end_factor=self.config.warmup_end_factor,
                 total_iters=warmup_steps,
             )
             from torch.optim.lr_scheduler import SequentialLR
@@ -232,15 +237,15 @@ class Trainer:
         elif self.config.lr_scheduler_type == "constant":
             self.scheduler = torch.optim.lr_scheduler.LinearLR(
                 self.optimizer,
-                start_factor=1.0,
-                end_factor=1.0,
+                start_factor=self.config.warmup_end_factor,
+                end_factor=self.config.warmup_end_factor,
                 total_iters=total_steps,
             )
         else:  # linear
             self.scheduler = torch.optim.lr_scheduler.LinearLR(
                 self.optimizer,
-                start_factor=0.1,
-                end_factor=1.0,
+                start_factor=self.config.warmup_start_factor,
+                end_factor=self.config.warmup_end_factor,
                 total_iters=warmup_steps,
             )
 
