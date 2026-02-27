@@ -20,6 +20,7 @@ class Sampler(ABC):
         self.diffusion = diffusion
         self.model = model
         self.mask_token_id = mask_token_id
+        self.vocab_size = diffusion.vocab_size  # Get vocab_size from diffusion
 
     @abstractmethod
     def sample(
@@ -72,7 +73,7 @@ class DDPMSampler(Sampler):
 
             # Sample from distribution
             probs = torch.softmax(logits, dim=-1)
-            x_t = torch.multinomial(probs.view(-1, self.vocab_size), 1).view(num_samples, seq_len)
+            x_t = torch.multinomial(probs.reshape(-1, self.vocab_size), 1).reshape(num_samples, seq_len)
 
         return x_t
 
@@ -89,10 +90,6 @@ class DDPMCachedSampler(Sampler):
     def __init__(self, *args, cache_predictions: bool = True, **kwargs):
         super().__init__(*args, **kwargs)
         self.cache_predictions = cache_predictions
-
-    @property
-    def vocab_size(self):
-        return self.diffusion.vocab_size
 
     def sample(
         self,
@@ -132,7 +129,7 @@ class DDPMCachedSampler(Sampler):
             probs = all_probs[:, t]
 
             # Sample from distribution
-            x_t = torch.multinomial(probs.view(-1, self.vocab_size), 1).view(num_samples, seq_len)
+            x_t = torch.multinomial(probs.reshape(-1, self.vocab_size), 1).reshape(num_samples, seq_len)
 
         return x_t
 
@@ -197,7 +194,7 @@ class SemiAutoregressiveSampler(Sampler):
                     logits = self.model(x, timesteps=torch.full((num_samples,), t, device=device))
 
                 probs = torch.softmax(logits, dim=-1)
-                x_new = torch.multinomial(probs.view(-1, self.vocab_size), 1).view(num_samples, seq_len)
+                x_new = torch.multinomial(probs.reshape(-1, self.vocab_size), 1).reshape(num_samples, seq_len)
 
                 # Update only this block
                 x[:, start_pos:end_pos] = x_new[:, start_pos:end_pos]
@@ -209,7 +206,7 @@ class SemiAutoregressiveSampler(Sampler):
                         logits = self.model(x, timesteps=torch.full((num_samples,), t, device=device))
 
                     probs = torch.softmax(logits, dim=-1)
-                    x_new = torch.multinomial(probs.view(-1, self.vocab_size), 1).view(num_samples, seq_len)
+                    x_new = torch.multinomial(probs.reshape(-1, self.vocab_size), 1).reshape(num_samples, seq_len)
 
                     x[:, start_pos:end_pos] = x_new[:, start_pos:end_pos]
 
@@ -271,7 +268,7 @@ class BlockwiseSampler(Sampler):
                 logits = self.model(x, timesteps=torch.zeros(num_samples, dtype=torch.long, device=device))
 
             probs = torch.softmax(logits, dim=-1)
-            predictions = torch.multinomial(probs.view(-1, self.vocab_size), 1).view(num_samples, seq_len)
+            predictions = torch.multinomial(probs.reshape(-1, self.vocab_size), 1).reshape(num_samples, seq_len)
 
             x = torch.where(still_masked, predictions, x)
 

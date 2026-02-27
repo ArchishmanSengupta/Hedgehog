@@ -149,7 +149,7 @@ class Trainer:
         self.global_step = 0
         self.epoch = 0
         self.best_metric = float('inf')
-        self.loss_scale = 1.0  # For gradient accumulation
+        self.loss_scale = 1  # For gradient accumulation
 
         # Output directory
         self.output_dir = Path(config.output_dir)
