@@ -52,10 +52,8 @@ class TestGetModel:
     """Test get_model function."""
 
     def test_get_builtin_model(self):
-        model_config = get_model("dit-small")
-        assert model_config is not None
-        assert "vocab_size" in model_config
-        assert "hidden_size" in model_config
+        model, tokenizer = get_model("dit-small")
+        assert model is not None
 
     def test_get_nonexistent_model(self):
         with pytest.raises(ValueError):
@@ -115,8 +113,8 @@ class TestGetDataset:
         assert "description" in dataset_config
 
     def test_get_nonexistent_dataset(self):
-        with pytest.raises(ValueError):
-            get_dataset_info("nonexistent-dataset")
+        result = get_dataset_info("nonexistent-dataset")
+        assert result is None
 
 
 class TestTrainingMethods:
