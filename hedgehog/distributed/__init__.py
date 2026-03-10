@@ -12,6 +12,7 @@ Supports:
 import os
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.distributed as dist
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass
@@ -164,8 +165,10 @@ class DistributedManager:
             return tensor
 
         world_size = self._world_size
-        output = torch.zeros_like(tensor).reshape(-1, world_size).sum(dim=1)
-        dist.reduce_scatter(output, tensor_list, op=op)
+        chunk_size = tensor.numel() // world_size
+        output = torch.zeros(chunk_size, dtype=tensor.dtype, device=tensor.device)
+        input_list = list(tensor.chunk(world_size))
+        dist.reduce_scatter(output, input_list, op=op)
         return output
 
 
@@ -204,9 +207,8 @@ class TensorParallelLinear(nn.Module):
         assert base_layer.out_features % tp_size == 0
         self.out_features_per_rank = base_layer.out_features // tp_size
 
-        # Local linear layer
         self.weight = nn.Parameter(
-            base_layer.weight[:, :self.out_features_per_rank].clone()
+            base_layer.weight[:self.out_features_per_rank, :].clone()
         )
         if base_layer.bias is not None:
             self.bias = nn.Parameter(
@@ -411,23 +413,26 @@ class FSDPWrapper:
 
     def _shard_parameters(self):
         """Shard model parameters across ranks."""
-        rank = get_distributed_manager().rank
         world_size = get_distributed_manager().world_size
+        if world_size <= 1:
+            return
 
+        rank = get_distributed_manager().rank
         for name, param in self.model.named_parameters():
-            # Only keep 1/world_size of the parameters on each rank
             if param.numel() > 0:
                 start = (param.numel() * rank) // world_size
                 end = (param.numel() * (rank + 1)) // world_size
-                # Store original size
                 param._original_numel = param.numel()
-                # Reshape to local shard
                 param.data = param.data.flatten()[start:end].clone()
                 param.data = param.data.reshape(param.shape[:-1] + (-1,)) if len(param.shape) > 1 else param.data
 
     def forward(self, *args, **kwargs):
         """Forward pass."""
         return self.model(*args, **kwargs)
+
+    def __call__(self, *args, **kwargs):
+        """Make wrapper callable."""
+        return self.forward(*args, **kwargs)
 
     def backward(self, loss: torch.Tensor):
         """Backward pass with gradient synchronization."""
