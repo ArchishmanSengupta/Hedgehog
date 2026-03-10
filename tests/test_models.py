@@ -66,9 +66,9 @@ class TestDiTBlock:
     def test_dit_block_forward(self):
         config = ModelConfig(hidden_size=128, num_heads=4)
         block = DiTBlock(config)
-        x = torch.randn(2, 10, 128)  # batch_size=2, seq_len=10, hidden=128
-        timestep = torch.tensor([100, 200])
-        result = block(x, timestep)
+        x = torch.randn(2, 10, 128)
+        timestep_emb = torch.randn(2, 128)
+        result = block(x, timestep_emb)
         assert result.shape == (2, 10, 128)
 
 
@@ -201,6 +201,112 @@ class TestCreateModel:
             timestep = torch.tensor([100])
             result = model(x, timestep)
             assert result.shape == (1, 10, vocab_size)
+
+    @pytest.mark.parametrize("hidden_size,num_heads", [
+        (64, 2), (128, 4), (256, 8), (512, 16)
+    ])
+    def test_dit_different_hidden_sizes(self, hidden_size, num_heads):
+        model = create_model(
+            model_type="dit",
+            vocab_size=100,
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            num_layers=1,
+            max_seq_len=32,
+        )
+        x = torch.randint(0, 100, (2, 16))
+        timestep = torch.tensor([50, 100])
+        result = model(x, timestep)
+        assert result.shape == (2, 16, 100)
+
+    @pytest.mark.parametrize("num_layers", [1, 2, 4, 8])
+    def test_layer_counts(self, num_layers):
+        model = create_model(
+            model_type="dit",
+            vocab_size=100,
+            hidden_size=64,
+            num_heads=2,
+            num_layers=num_layers,
+            max_seq_len=32,
+        )
+        x = torch.randint(0, 100, (2, 16))
+        timestep = torch.tensor([50, 100])
+        result = model(x, timestep)
+        assert result.shape == (2, 16, 100)
+
+    @pytest.mark.parametrize("seq_len", [8, 16, 32, 64, 128])
+    def test_dit_different_sequence_lengths(self, seq_len):
+        model = create_model(
+            model_type="dit",
+            vocab_size=100,
+            hidden_size=64,
+            num_heads=2,
+            num_layers=1,
+            max_seq_len=seq_len,
+        )
+        x = torch.randint(0, 100, (1, seq_len // 2))
+        timestep = torch.tensor([50])
+        result = model(x, timestep)
+        assert result.shape == (1, seq_len // 2, 100)
+
+    def test_dit_with_batch_size_one(self):
+        model = create_model(
+            model_type="dit",
+            vocab_size=100,
+            hidden_size=64,
+            num_heads=2,
+            num_layers=1,
+            max_seq_len=32,
+        )
+        x = torch.randint(0, 100, (1, 16))
+        timestep = torch.tensor([50])
+        result = model(x, timestep)
+        assert result.shape == (1, 16, 100)
+
+    def test_dit_without_timestep(self):
+        model = create_model(
+            model_type="dit",
+            vocab_size=100,
+            hidden_size=64,
+            num_heads=2,
+            num_layers=1,
+            max_seq_len=32,
+        )
+        x = torch.randint(0, 100, (2, 16))
+        result = model(x, None)
+        assert result.shape == (2, 16, 100)
+
+    def test_dit_with_different_dropout(self):
+        for dropout in [0.0, 0.1, 0.2, 0.5]:
+            model = create_model(
+                model_type="dit",
+                vocab_size=100,
+                hidden_size=64,
+                num_heads=2,
+                num_layers=1,
+                max_seq_len=32,
+                dropout=dropout,
+            )
+            model.eval()  # Disable dropout for deterministic test
+            x = torch.randint(0, 100, (1, 16))
+            timestep = torch.tensor([50])
+            result = model(x, timestep)
+            assert result.shape == (1, 16, 100)
+
+    @pytest.mark.parametrize("model_type", ["dit", "ar"])
+    def test_ar_and_dit_compatibility(self, model_type):
+        model = create_model(
+            model_type=model_type,
+            vocab_size=100,
+            hidden_size=64,
+            num_heads=2,
+            num_layers=1,
+            max_seq_len=32,
+        )
+        x = torch.randint(0, 100, (2, 16))
+        timestep = torch.tensor([50, 100])
+        result = model(x, timestep)
+        assert result.shape == (2, 16, 100)
 
 
 if __name__ == "__main__":
