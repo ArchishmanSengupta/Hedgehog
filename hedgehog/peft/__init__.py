@@ -103,15 +103,10 @@ class LoRAEmbedding(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Get embeddings with LoRA adaptation."""
-        # Base embeddings
-        base_embeds = self.base_embedding(x)  # (batch, seq, dim)
-
-        # LoRA adaptation - project up to r, then back to dim
-        # lora_A: (r, embedding_dim), lora_B: (num_embeddings, r)
-        lora_embeds = torch.matmul(base_embeds, self.lora_A.T)  # (batch, seq, r)
-        # This is different from standard LoRA - we need to add to embeddings
-        # For now, skip the embedding-specific LoRA and return base
-        return base_embeds
+        base_embeds = self.base_embedding(x)
+        after_A = F.embedding(x, self.lora_B)
+        lora_embeds = torch.matmul(after_A, self.lora_A) * self.scaling
+        return base_embeds + lora_embeds
 
 
 class LoRALinear(nn.Module):
@@ -132,11 +127,9 @@ class LoRALinear(nn.Module):
         self.scaling = lora_alpha / r
         self.fan_in_fan_out = fan_in_fan_out
 
-        # Get dimensions from base layer
         in_features = base_layer.in_features
         out_features = base_layer.out_features
 
-        # LoRA layer
         self.lora = LoRALayer(
             in_features=in_features,
             out_features=out_features,
@@ -144,6 +137,14 @@ class LoRALinear(nn.Module):
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
         )
+
+    @property
+    def weight(self):
+        return self.base_layer.weight
+
+    @property
+    def bias(self):
+        return self.base_layer.bias
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass."""
@@ -176,6 +177,11 @@ class IA3Layer(nn.Module):
 
         # IA3 scaling vectors (learnable)
         self.ia3_vector = nn.Parameter(torch.zeros(out_features))
+
+        if hasattr(base_layer, 'weight'):
+            self.weight = base_layer.weight
+        if hasattr(base_layer, 'bias'):
+            self.bias = base_layer.bias
 
         # Freeze base layer
         for param in base_layer.parameters():
@@ -223,9 +229,8 @@ class PrefixTuning(nn.Module):
 
     def get_prefix(self, batch_size: int, device: torch.device) -> torch.Tensor:
         """Get prefix embeddings for the batch."""
-        # Use MLP for prefix
-        dummy = torch.zeros(1, self.hidden_size, device=device)
-        prefix_flat = self.mlp(dummy)
+        prefix_input = self.prefix_embeddings.mean(dim=1).mean(dim=0, keepdim=True)
+        prefix_flat = self.mlp(prefix_input)
         prefix = prefix_flat.view(self.num_layers, 1, self.hidden_size)
         prefix = prefix.expand(-1, batch_size, -1)
         return prefix
@@ -271,49 +276,45 @@ class DoRALayer(nn.Module):
         self.lora_alpha = lora_alpha
         self.scaling = lora_alpha / r
 
-        # Get dimensions
         in_features = base_layer.in_features
         out_features = base_layer.out_features
 
-        # Decompose weight: W = W_base + m * (W_A * W_B)
         self.lora_A = nn.Parameter(torch.zeros(r, in_features))
         self.lora_B = nn.Parameter(torch.zeros(out_features, r))
 
-        # Magnitude parameter
         self.magnitude = nn.Parameter(torch.ones(out_features))
 
-        # Dropout
         self.lora_dropout = nn.Dropout(p=lora_dropout) if lora_dropout > 0 else nn.Identity()
 
         self._reset_parameters()
 
+    @property
+    def weight(self):
+        return self.base_layer.weight
+
+    @property
+    def bias(self):
+        return self.base_layer.bias
+
     def _reset_parameters(self):
-        """Initialize parameters."""
         nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
         nn.init.zeros_(self.lora_B)
         nn.init.ones_(self.magnitude)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass with DoRA."""
-        # Base output
         base_output = self.base_layer(x)
 
-        # LoRA output
         lora_output = self.lora_dropout(x)
         lora_output = torch.matmul(lora_output, self.lora_A.T)
         lora_output = torch.matmul(lora_output, self.lora_B.T)
 
-        # Get magnitudes
-        base_norm = torch.norm(self.base_layer.weight, dim=1, keepdim=True)  # (out_features, 1)
-        lora_norm = torch.norm(torch.matmul(self.lora_A, self.lora_B), dim=1, keepdim=True)
-        lora_norm = lora_norm * self.scaling
+        base_norm = torch.norm(self.base_layer.weight, dim=1)
+        lora_weight = torch.matmul(self.lora_B, self.lora_A)
+        combined_weight = self.base_layer.weight + lora_weight * self.scaling
+        combined_norm = torch.norm(combined_weight, dim=1)
 
-        # Combine
-        combined_norm = base_norm + lora_norm
-        normalized = base_output / (base_norm + 1e-8)
-        scaled = normalized * (self.magnitude * combined_norm)
-
-        return scaled
+        scale = (self.magnitude * combined_norm) / (base_norm + 1e-8)
+        return base_output * scale + lora_output * self.scaling
 
 
 class LoraModel(nn.Module):
@@ -336,13 +337,16 @@ class LoraModel(nn.Module):
         """Apply LoRA to target modules in the model."""
         target_modules = self.config.target_modules or self._get_default_target_modules()
 
-        # Recursively find and modify modules
+        replacements = []
         for name, module in self.base_model.named_modules():
-            # Check if this module matches target
-            for target in target_modules:
-                if target in name:
-                    self._replace_with_lora(module, name)
-                    break
+            if isinstance(module, nn.Linear):
+                for target in target_modules:
+                    if target in name:
+                        replacements.append((name, module))
+                        break
+
+        for name, module in replacements:
+            self._replace_with_lora(module, name)
 
     def _get_default_target_modules(self) -> List[str]:
         """Get default target modules for LoRA."""
@@ -350,6 +354,7 @@ class LoraModel(nn.Module):
             "q_proj", "k_proj", "v_proj", "o_proj",
             "gate_proj", "up_proj", "down_proj",
             "fc1", "fc2", "attention.qkv",
+            "mlp", "lm_head", "out_proj", "in_proj",
         ]
 
     def _replace_with_lora(self, module: nn.Module, name: str):
@@ -391,7 +396,17 @@ class LoraModel(nn.Module):
 
     def merge_lora(self):
         """Merge LoRA weights into base model."""
-        raise NotImplementedError("LoRA weight merging not yet implemented")
+        for name, module in self.base_model.named_modules():
+            if isinstance(module, LoRALinear):
+                base = module.base_layer
+                lora = module.lora
+                delta = (lora.lora_B @ lora.lora_A) * lora.scaling
+                base.weight.data += delta
+                parts = name.split('.')
+                parent = self.base_model
+                for part in parts[:-1]:
+                    parent = getattr(parent, part)
+                setattr(parent, parts[-1], base)
 
     def save_peft_checkpoint(self, path: str):
         """Save only PEFT (LoRA) parameters."""
@@ -406,6 +421,51 @@ class LoraModel(nn.Module):
         """Load PEFT (LoRA) parameters."""
         state_dict = torch.load(path, map_location="cpu")
         self.load_state_dict(state_dict, strict=False)
+
+
+class DoRAModel(nn.Module):
+    """Wrapper model with DoRA adapters applied."""
+
+    def __init__(self, base_model: nn.Module, config: LoraConfig):
+        super().__init__()
+        self.base_model = base_model
+        self.config = config
+        self.peft_config = config
+        self._apply_dora()
+
+    def _apply_dora(self):
+        target_modules = self.config.target_modules or [
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj",
+            "fc1", "fc2", "mlp", "lm_head", "out_proj", "in_proj",
+        ]
+
+        replacements = []
+        for name, module in self.base_model.named_modules():
+            if isinstance(module, nn.Linear):
+                for target in target_modules:
+                    if target in name:
+                        replacements.append((name, module))
+                        break
+
+        for name, module in replacements:
+            dora_layer = DoRALayer(
+                base_layer=module,
+                r=self.config.r,
+                lora_alpha=self.config.lora_alpha,
+                lora_dropout=self.config.lora_dropout,
+            )
+            parts = name.split('.')
+            parent = self.base_model
+            for part in parts[:-1]:
+                parent = getattr(parent, part)
+            setattr(parent, parts[-1], dora_layer)
+
+    def forward(self, *args, **kwargs):
+        return self.base_model(*args, **kwargs)
+
+    def get_trainable_parameters(self):
+        return [p for p in self.parameters() if p.requires_grad]
 
 
 def create_peft_model(
@@ -428,7 +488,7 @@ def create_peft_model(
         return LoraModel(base_model, config)
     elif peft_type == "dora":
         config = LoraConfig(**kwargs)
-        return LoraModel(base_model, config)  # Use DoRA internally
+        return DoRAModel(base_model, config)
     elif peft_type == "ia3":
         return IA3Model(base_model, **kwargs)
     elif peft_type == "prefix":
@@ -471,15 +531,22 @@ class PrefixTuningModel(nn.Module):
     def __init__(self, base_model: nn.Module, prefix_length: int = 10):
         super().__init__()
         self.base_model = base_model
-        hidden_size = getattr(base_model, 'hidden_size', 384)
+        self.prefix_length = prefix_length
 
-        # Get num_layers from model config or fallback to default
-        num_layers = 12
+        if not hasattr(base_model, 'hidden_size'):
+            raise ValueError("base_model must have a 'hidden_size' attribute for PrefixTuning")
+        hidden_size = base_model.hidden_size
+
+        num_layers = None
         if hasattr(base_model, 'config') and base_model.config is not None:
             if hasattr(base_model.config, 'num_layers'):
                 num_layers = base_model.config.num_layers
             elif hasattr(base_model.config, 'num_hidden_layers'):
                 num_layers = base_model.config.num_hidden_layers
+        if num_layers is None and hasattr(base_model, 'blocks'):
+            num_layers = len(base_model.blocks)
+        if num_layers is None:
+            raise ValueError("Cannot determine num_layers from base_model for PrefixTuning")
 
         self.prefix_tuning = PrefixTuning(
             hidden_size=hidden_size,
@@ -487,8 +554,40 @@ class PrefixTuningModel(nn.Module):
             num_layers=num_layers,
         )
 
-    def forward(self, *args, **kwargs):
-        return self.base_model(*args, **kwargs)
+    def forward(self, x, **kwargs):
+        batch_size = x.shape[0]
+        device = x.device
+
+        if hasattr(self.base_model, 'token_embed'):
+            h = self.base_model.token_embed(x)
+
+            prefix = self.prefix_tuning.prefix_embeddings[0, :, :].unsqueeze(0)
+            prefix = prefix.expand(batch_size, -1, -1).to(device)
+            h = torch.cat([prefix, h], dim=1)
+
+            if hasattr(self.base_model, 'pos_embed'):
+                seq_len = h.shape[1]
+                pos_emb = self.base_model.pos_embed(seq_len, device)
+                h = h + pos_emb
+
+            timesteps = kwargs.get('timesteps', None)
+            t_emb = None
+            if timesteps is not None and hasattr(self.base_model, 'get_timestep_embedding'):
+                t_emb = self.base_model.get_timestep_embedding(timesteps)
+                t_emb = self.base_model.timestep_embed(t_emb)
+                h = h + t_emb.unsqueeze(1)
+
+            if hasattr(self.base_model, 'dropout'):
+                h = self.base_model.dropout(h)
+
+            for block in self.base_model.blocks:
+                h = block(h, t_emb)
+
+            h = self.base_model.norm_final(h)
+            logits = self.base_model.lm_head(h)
+            return logits[:, self.prefix_length:, :]
+
+        return self.base_model(x, **kwargs)
 
 
 class PromptTuningModel(nn.Module):
@@ -497,17 +596,61 @@ class PromptTuningModel(nn.Module):
     def __init__(
         self,
         base_model: nn.Module,
-        vocab_size: int,
+        vocab_size: Optional[int] = None,
         prompt_length: int = 20,
     ):
         super().__init__()
         self.base_model = base_model
-        hidden_size = getattr(base_model, 'hidden_size', 384)
+        self.prompt_length = prompt_length
+
+        if not hasattr(base_model, 'hidden_size'):
+            raise ValueError("base_model must have a 'hidden_size' attribute for PromptTuning")
+        hidden_size = base_model.hidden_size
+
+        if vocab_size is None:
+            if hasattr(base_model, 'vocab_size'):
+                vocab_size = base_model.vocab_size
+            elif hasattr(base_model, 'config') and hasattr(base_model.config, 'vocab_size'):
+                vocab_size = base_model.config.vocab_size
+            else:
+                raise ValueError("Cannot determine vocab_size from base_model for PromptTuning. Pass vocab_size explicitly.")
+
         self.prompt_tuning = PromptTuning(
             vocab_size=vocab_size,
             hidden_size=hidden_size,
             prompt_length=prompt_length,
         )
 
-    def forward(self, *args, **kwargs):
-        return self.base_model(*args, **kwargs)
+    def forward(self, x, **kwargs):
+        batch_size = x.shape[0]
+        device = x.device
+
+        if hasattr(self.base_model, 'token_embed'):
+            h = self.base_model.token_embed(x)
+
+            prompt = self.prompt_tuning(batch_size, device)
+            h = torch.cat([prompt, h], dim=1)
+
+            if hasattr(self.base_model, 'pos_embed'):
+                seq_len = h.shape[1]
+                pos_emb = self.base_model.pos_embed(seq_len, device)
+                h = h + pos_emb
+
+            timesteps = kwargs.get('timesteps', None)
+            t_emb = None
+            if timesteps is not None and hasattr(self.base_model, 'get_timestep_embedding'):
+                t_emb = self.base_model.get_timestep_embedding(timesteps)
+                t_emb = self.base_model.timestep_embed(t_emb)
+                h = h + t_emb.unsqueeze(1)
+
+            if hasattr(self.base_model, 'dropout'):
+                h = self.base_model.dropout(h)
+
+            for block in self.base_model.blocks:
+                h = block(h, t_emb)
+
+            h = self.base_model.norm_final(h)
+            logits = self.base_model.lm_head(h)
+            return logits[:, self.prompt_length:, :]
+
+        return self.base_model(x, **kwargs)
