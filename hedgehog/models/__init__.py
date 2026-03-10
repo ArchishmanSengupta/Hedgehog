@@ -10,18 +10,22 @@ Based on research from:
 import torch
 import torch.nn as nn
 import math
+import logging
 from typing import Optional
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class ModelConfig:
     """Configuration for diffusion language models."""
-    vocab_size: int
-    hidden_size: int
-    num_heads: int
-    num_layers: int
-    max_seq_len: int
+    model_type: str = "dit"
+    vocab_size: int = 32768
+    hidden_size: int = 384
+    num_heads: int = 6
+    num_layers: int = 12
+    max_seq_len: int = 512
     dropout: float = 0.1
     emb_dropout: float = 0.0
 
@@ -34,25 +38,62 @@ class SinusoidalPositionEmbedding(nn.Module):
         self.dim = dim
         self.max_seq_len = max_seq_len
 
-    def forward(self, seq_len: int, device: torch.device) -> torch.Tensor:
-        """Generate sinusoidal position embeddings."""
+    def forward(self, seq_len: int, device: torch.device = None) -> torch.Tensor:
+        """Generate sinusoidal position embeddings.
+
+        Args:
+            seq_len: Sequence length (int) or input tensor
+            device: Device to create embeddings on (only used if seq_len is int)
+
+        Returns:
+            Position embeddings [batch, seq_len, dim] if input is tensor,
+            otherwise [1, seq_len, dim]
+        """
+        # Handle both cases: forward(seq_len, device) or forward(x) tensor
+        batch_size = 1
+        if isinstance(seq_len, torch.Tensor):
+            x = seq_len
+            batch_size = x.shape[0]
+            seq_len = x.shape[1]
+            device = x.device
+
         position = torch.arange(seq_len, device=device).unsqueeze(1)
         div_term = torch.exp(
-            torch.arange(0, self.dim, 2, device=device) * (-math.log(10000.0) / self.dim)
+            torch.arange(0, self.dim, 2, device=device) * (-math.log(10000.0) / max(self.dim, 1))
         )
         pe = torch.zeros(seq_len, self.dim, device=device)
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        return pe.unsqueeze(0)
+        # Expand to batch size if > 1
+        if batch_size > 1:
+            pe = pe.unsqueeze(0).expand(batch_size, -1, -1)
+        else:
+            pe = pe.unsqueeze(0)
+        return pe
 
 
 class DiTBlock(nn.Module):
     """Diffusion Transformer block with adaptive layer norm."""
 
-    def __init__(self, hidden_size: int, num_heads: int, dropout: float = 0.1):
+    def __init__(
+        self,
+        hidden_size: int = 384,
+        num_heads: int = 6,
+        dropout: float = 0.1,
+        model_type: str = "dit",
+        mlp_ratio: int = 4,
+    ):
         super().__init__()
+        if isinstance(hidden_size, ModelConfig):
+            config = hidden_size
+            hidden_size = config.hidden_size
+            num_heads = config.num_heads
+            dropout = config.dropout
+            model_type = getattr(config, 'model_type', 'dit')
+
         self.hidden_size = hidden_size
         self.num_heads = num_heads
+        self.model_type = model_type
 
         self.norm1 = nn.LayerNorm(hidden_size)
         self.attn = nn.MultiheadAttention(
@@ -60,16 +101,11 @@ class DiTBlock(nn.Module):
         )
 
         self.norm2 = nn.LayerNorm(hidden_size)
-        self.cross_attn = nn.MultiheadAttention(
-            hidden_size, num_heads, dropout=dropout, batch_first=True
-        )
-
-        self.norm3 = nn.LayerNorm(hidden_size)
         self.mlp = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size * 4),
+            nn.Linear(hidden_size, hidden_size * mlp_ratio),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_size * 4, hidden_size),
+            nn.Linear(hidden_size * mlp_ratio, hidden_size),
             nn.Dropout(dropout),
         )
 
@@ -150,10 +186,16 @@ class DiffusionTransformer(nn.Module):
         hidden_size: int = 384,
         num_heads: int = 6,
         num_layers: int = 12,
-        max_seq_len: int = 1024,
+        max_seq_len: int = 512,
         dropout: float = 0.1,
+        mlp_ratio: int = 4,
     ):
         super().__init__()
+        if hidden_size % num_heads != 0:
+            raise ValueError(
+                f"hidden_size ({hidden_size}) must be divisible by num_heads ({num_heads})"
+            )
+
         self.config = ModelConfig(
             vocab_size=vocab_size,
             hidden_size=hidden_size,
@@ -166,14 +208,12 @@ class DiffusionTransformer(nn.Module):
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
 
-        # Token embeddings
         self.token_embed = nn.Embedding(vocab_size, hidden_size)
 
-        # Timestep embeddings (similar to DiT)
         self.timestep_embed = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size * 4),
+            nn.Linear(hidden_size, hidden_size * mlp_ratio),
             nn.SiLU(),
-            nn.Linear(hidden_size * 4, hidden_size),
+            nn.Linear(hidden_size * mlp_ratio, hidden_size),
         )
 
         # Position embeddings
@@ -197,7 +237,7 @@ class DiffusionTransformer(nn.Module):
     def get_timestep_embedding(self, timesteps: torch.Tensor) -> torch.Tensor:
         """Create sinusoidal timestep embeddings."""
         half_dim = self.hidden_size // 2
-        emb = math.log(10000) / (half_dim - 1)
+        emb = math.log(10000.0) / max(half_dim - 1, 1)
         emb = torch.exp(torch.arange(half_dim, device=timesteps.device) * -emb)
         emb = timesteps.float()[:, None] * emb[None, :]
         emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
@@ -260,10 +300,16 @@ class AutoregressiveTransformer(nn.Module):
         hidden_size: int = 384,
         num_heads: int = 6,
         num_layers: int = 12,
-        max_seq_len: int = 1024,
+        max_seq_len: int = 512,
         dropout: float = 0.1,
+        mlp_ratio: int = 4,
     ):
         super().__init__()
+        if hidden_size % num_heads != 0:
+            raise ValueError(
+                f"hidden_size ({hidden_size}) must be divisible by num_heads ({num_heads})"
+            )
+
         self.config = ModelConfig(
             vocab_size=vocab_size,
             hidden_size=hidden_size,
@@ -276,15 +322,13 @@ class AutoregressiveTransformer(nn.Module):
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
 
-        # Token embeddings
         self.token_embed = nn.Embedding(vocab_size, hidden_size)
         self.pos_embed = nn.Embedding(max_seq_len, hidden_size)
 
-        # Transformer blocks
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_size,
             nhead=num_heads,
-            dim_feedforward=hidden_size * 4,
+            dim_feedforward=hidden_size * mlp_ratio,
             dropout=dropout,
             activation="gelu",
             batch_first=True,
@@ -346,32 +390,39 @@ class MambaBlock(nn.Module):
     Based on "Mamba: Linear-time Sequence Modeling with Selective State Spaces"
     """
 
-    def __init__(self, hidden_size: int, state_size: int = 64):
+    def __init__(
+        self,
+        d_model: int = 384,
+        d_state: int = 64,
+        expand: int = 2,
+    ):
         super().__init__()
-        self.hidden_size = hidden_size
-        self.state_size = state_size
+        self.d_model = d_model
+        self.d_state = d_state
+        self.expand = expand
+
+        # Compute internal dimension
+        hidden_size = d_model * expand
 
         # Input projection
-        self.x_proj = nn.Linear(hidden_size, hidden_size, bias=False)
-        self.dt_proj = nn.Linear(hidden_size, hidden_size, bias=True)
+        self.x_proj = nn.Linear(d_model, d_model, bias=False)
+        self.dt_proj = nn.Linear(d_model, d_model, bias=True)
 
         # State space parameters
-        self.A_log = nn.Parameter(torch.randn(hidden_size, state_size))
-        self.D = nn.Parameter(torch.ones(hidden_size))
+        self.A_log = nn.Parameter(torch.randn(d_model, d_state))
+        self.D = nn.Parameter(torch.ones(d_model))
 
         # Output
-        self.conv1d = nn.Conv1d(hidden_size, hidden_size, kernel_size=3, padding=1)
-        self.out_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.conv1d = nn.Conv1d(d_model, d_model, kernel_size=3, padding=1)
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass using selective state space."""
-        # Simplified Mamba block
         x_gate = self.conv1d(x.transpose(1, 2)).transpose(1, 2)
         x = x * torch.sigmoid(x_gate)
 
-        # State projection
         s = torch.einsum('bld,dn->bln', x, self.A_log.exp())
-        y = torch.einsum('bld,bd,bn->bl', s, self.D, x)
+        y = torch.einsum('bln,d->bld', s, self.D)
 
         return self.out_proj(y)
 
@@ -382,20 +433,21 @@ def create_model(
     hidden_size: int = 384,
     num_heads: int = 6,
     num_layers: int = 12,
-    max_seq_len: int = 1024,
+    max_seq_len: int = 512,
     dropout: float = 0.1,
 ) -> nn.Module:
     """Factory function to create models."""
     model_map = {
         "dit": DiffusionTransformer,
         "ar": AutoregressiveTransformer,
-        "mamba": lambda vs, hs, nh, nl, msl, dp: DiffusionTransformer(
-            vs, hs, nh, nl, msl, dp  # Use DiT for now
-        ),
+        "mamba": lambda **kwargs: DiffusionTransformer(**kwargs),
     }
 
     if model_type not in model_map:
         raise ValueError(f"Unknown model type: {model_type}")
+
+    if model_type == "mamba":
+        logger.warning("model_type='mamba' currently uses DiffusionTransformer. Full Mamba integration is not yet implemented.")
 
     return model_map[model_type](
         vocab_size=vocab_size,
