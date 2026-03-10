@@ -155,5 +155,36 @@ class TestSampler:
             Sampler(diffusion=None, model=None, mask_token_id=0)
 
 
+class TestSamplersEdgeCases:
+    """Test sampler edge cases."""
+
+    @pytest.mark.parametrize("num_samples", [1, 2, 4, 8])
+    def test_different_num_samples(self, diffusion, model, mask_token_id, num_samples):
+        sampler = DDPMSampler(diffusion=diffusion, model=model, mask_token_id=mask_token_id)
+        samples = sampler.sample(num_samples=num_samples, seq_len=16, device="cpu")
+        assert samples.shape[0] == num_samples
+
+    @pytest.mark.parametrize("seq_len", [4, 8, 16, 32])
+    def test_different_seq_lens(self, diffusion, model, mask_token_id, seq_len):
+        sampler = DDPMSampler(diffusion=diffusion, model=model, mask_token_id=mask_token_id)
+        samples = sampler.sample(num_samples=2, seq_len=seq_len, device="cpu")
+        assert samples.shape[1] == seq_len
+
+
+class TestSamplerFactoryEdgeCases:
+    """Test create_sampler edge cases."""
+
+    @pytest.mark.parametrize("sampler_type", ["ddpm", "ddpm_cache", "analytic", "semi_ar", "blockwise"])
+    @pytest.mark.parametrize("diffusion_type", ["mdlm", "d3pm"])
+    def test_sampler_with_different_diffusion_types(self, diffusion, model, mask_token_id, sampler_type, diffusion_type):
+        if diffusion_type == "d3pm":
+            from hedgehog.diffusion import create_diffusion
+            diff = create_diffusion("d3pm", vocab_size=100, num_timesteps=10)
+        else:
+            diff = diffusion
+        sampler = create_sampler(sampler_type, diffusion=diff, model=model, mask_token_id=mask_token_id)
+        assert sampler is not None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
