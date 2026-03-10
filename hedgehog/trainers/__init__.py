@@ -14,11 +14,26 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from typing import Optional, Dict, Any, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, asdict
 from pathlib import Path
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+FORCE_LOAD_KEYS = frozenset([
+    "model_type", "hidden_size", "num_heads", "num_layers",
+    "vocab_size", "max_seq_len", "diffusion_type",
+])
+
+LOAD_KEYS = frozenset([
+    "noise_schedule", "num_timesteps", "mask_token_id",
+    "dropout",
+])
+
+DATA_KEYS = frozenset([
+    "per_device_batch_size", "dataloader_num_workers",
+])
 
 
 @dataclass
@@ -36,14 +51,14 @@ class TrainerConfig:
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
     warmup_steps: int = 500
-    warmup_start_factor: float = 0.1  # Starting LR multiplier for warmup
-    warmup_end_factor: float = 1.0  # Ending LR multiplier after warmup
-    lr_scheduler_type: str = "linear"  # linear, cosine, constant
-    min_lr: float = 1e-6  # Minimum learning rate for cosine scheduler
+    warmup_start_factor: float = 0.1
+    warmup_end_factor: float = 1.0
+    lr_scheduler_type: str = "linear"
+    min_lr: float = 1e-6
 
     # Mixed precision
-    use_amp: bool = False  # Automatic mixed precision
-    amp_dtype: str = "float16"  # float16 or bfloat16
+    use_amp: bool = False
+    amp_dtype: str = "float16"
 
     # Model architecture
     hidden_size: int = 384
@@ -51,7 +66,7 @@ class TrainerConfig:
     num_layers: int = 12
     max_seq_len: int = 512
     dropout: float = 0.1
-    mask_token_id: Optional[int] = None  # Mask token ID (defaults to vocab_size - 1)
+    mask_token_id: Optional[int] = None
 
     # Diffusion
     diffusion_type: str = "mdlm"
@@ -66,14 +81,172 @@ class TrainerConfig:
     eval_steps: int = 500
 
     # Device
-    device: str = "auto"  # auto, cpu, cuda, mps
+    device: str = "auto"
 
     # Misc
     seed: int = 42
     dataloader_num_workers: int = 4
     resume_from_checkpoint: Optional[str] = None
-    fp16: bool = False  # Legacy option for AMP (use use_amp instead)
-    bf16: bool = False  # Legacy option for AMP (use use_amp and amp_dtype instead)
+    load_args_from_checkpoint: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def to_dict_versioned(self) -> Dict[str, Any]:
+        """Return dict with hedgehog version included."""
+        import hedgehog
+        d = self.to_dict()
+        d["hedgehog_version"] = hedgehog.__version__
+        return d
+
+    @staticmethod
+    def _check_json_serializable(d: Dict[str, Any]) -> Dict[str, Any]:
+        """Ensure all values are JSON-serializable, converting where needed."""
+        clean = {}
+        for k, v in d.items():
+            if isinstance(v, Path):
+                clean[k] = str(v)
+            elif isinstance(v, (set, frozenset)):
+                clean[k] = list(v)
+            elif isinstance(v, float) and (v != v):
+                clean[k] = None
+            else:
+                try:
+                    json.dumps(v)
+                    clean[k] = v
+                except (TypeError, ValueError):
+                    clean[k] = str(v)
+        return clean
+
+    def to_json(self, path: str) -> None:
+        d = self._check_json_serializable(self.to_dict_versioned())
+        with open(path, "w") as f:
+            json.dump(d, f, indent=2)
+
+    def to_yaml(self, path: str) -> None:
+        try:
+            import yaml
+        except ImportError:
+            raise ImportError("PyYAML is required for YAML support. Install with: pip install pyyaml")
+        d = self._check_json_serializable(self.to_dict_versioned())
+        with open(path, "w") as f:
+            yaml.dump(d, f, default_flow_style=False, sort_keys=False)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "TrainerConfig":
+        valid_fields = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in d.items() if k in valid_fields}
+        return cls(**filtered)
+
+    @classmethod
+    def from_json(cls, path: str) -> "TrainerConfig":
+        with open(path, "r") as f:
+            d = json.load(f)
+        return cls.from_dict(d)
+
+    @classmethod
+    def from_yaml(cls, path: str) -> "TrainerConfig":
+        try:
+            import yaml
+        except ImportError:
+            raise ImportError("PyYAML is required for YAML support. Install with: pip install pyyaml")
+        with open(path, "r") as f:
+            d = yaml.safe_load(f)
+        if d is None:
+            d = {}
+        return cls.from_dict(d)
+
+    @classmethod
+    def from_file(cls, path: str) -> "TrainerConfig":
+        path_lower = path.lower()
+        if path_lower.endswith((".yaml", ".yml")):
+            return cls.from_yaml(path)
+        elif path_lower.endswith(".json"):
+            return cls.from_json(path)
+        else:
+            raise ValueError(f"Unsupported config file format: {path}. Use .yaml, .yml, or .json")
+
+    @classmethod
+    def from_pretrained(cls, checkpoint_dir: str) -> "TrainerConfig":
+        """Reconstruct config from a checkpoint directory.
+
+        Looks for args.json first, then falls back to reading config from
+        the latest .pt checkpoint file.
+        """
+        checkpoint_dir = Path(checkpoint_dir)
+        args_path = checkpoint_dir / "args.json"
+        if args_path.exists():
+            return cls.from_json(str(args_path))
+
+        pt_files = sorted(checkpoint_dir.glob("*.pt"), key=lambda p: p.stat().st_mtime)
+        if pt_files:
+            checkpoint = torch.load(str(pt_files[-1]), map_location="cpu", weights_only=False)
+            if "config" in checkpoint and checkpoint["config"]:
+                return cls.from_dict(checkpoint["config"])
+
+        raise FileNotFoundError(
+            f"No args.json or .pt checkpoint with config found in {checkpoint_dir}"
+        )
+
+    def merge(self, overrides: Dict[str, Any]) -> "TrainerConfig":
+        d = self.to_dict()
+        valid_fields = {f.name for f in fields(self.__class__)}
+        for k, v in overrides.items():
+            if k in valid_fields and v is not None:
+                d[k] = v
+        return self.__class__.from_dict(d)
+
+    def apply_context_defaults(self, use_peft: bool = False,
+                               peft_type: Optional[str] = None) -> "TrainerConfig":
+        """Apply context-aware defaults based on training mode.
+
+        For LoRA/DoRA/IA3 training, ms-swift uses different defaults:
+        - Higher learning rate (2e-4 vs 1e-4) for adapter params
+        - Fewer warmup steps
+        """
+        d = self.to_dict()
+        defaults = self.__class__()
+
+        if use_peft and peft_type in ("lora", "dora"):
+            if d["learning_rate"] == defaults.learning_rate:
+                d["learning_rate"] = 2e-4
+            if d["warmup_steps"] == defaults.warmup_steps:
+                d["warmup_steps"] = 100
+        elif use_peft and peft_type == "ia3":
+            if d["learning_rate"] == defaults.learning_rate:
+                d["learning_rate"] = 1e-3
+            if d["warmup_steps"] == defaults.warmup_steps:
+                d["warmup_steps"] = 50
+
+        return self.__class__.from_dict(d)
+
+    def selective_merge(self, saved: Dict[str, Any],
+                        load_data_args: bool = False) -> "TrainerConfig":
+        """Merge saved config into current using selective key loading tiers.
+
+        - FORCE_LOAD_KEYS: Always overwritten from saved config
+        - LOAD_KEYS: Only loaded if current value is None or matches the default
+        - DATA_KEYS: Only loaded if load_data_args is True
+        """
+        d = self.to_dict()
+        defaults = self.__class__()
+        valid_fields = {f.name for f in fields(self.__class__)}
+
+        for k, v in saved.items():
+            if k not in valid_fields or v is None:
+                continue
+            if k in FORCE_LOAD_KEYS:
+                d[k] = v
+            elif k in LOAD_KEYS:
+                current = d.get(k)
+                default = getattr(defaults, k, None)
+                if current is None or current == default:
+                    d[k] = v
+            elif k in DATA_KEYS:
+                if load_data_args:
+                    d[k] = v
+
+        return self.__class__.from_dict(d)
 
 
 class Trainer:
@@ -149,7 +322,7 @@ class Trainer:
         self.global_step = 0
         self.epoch = 0
         self.best_metric = float('inf')
-        self.loss_scale = 1  # For gradient accumulation
+        self.accum_count = 0
 
         # Output directory
         self.output_dir = Path(config.output_dir)
@@ -293,7 +466,8 @@ class Trainer:
 
         # Forward pass with optional AMP
         if self.scaler is not None:
-            with torch.cuda.amp.autocast():
+            amp_dtype = torch.float16 if self.config.amp_dtype == "float16" else torch.bfloat16
+            with torch.cuda.amp.autocast(dtype=amp_dtype):
                 loss = self.compute_loss(batch)
                 loss = loss / self.config.gradient_accumulation_steps
 
@@ -306,11 +480,9 @@ class Trainer:
             # Backward pass
             loss.backward()
 
-        # Accumulate gradients
-        self.loss_scale += 1
+        self.accum_count += 1
 
-        # Perform optimizer step when accumulation is complete
-        if self.loss_scale >= self.config.gradient_accumulation_steps:
+        if self.accum_count >= self.config.gradient_accumulation_steps:
             # Gradient clipping
             if self.config.max_grad_norm > 0:
                 if self.scaler is not None:
@@ -327,9 +499,8 @@ class Trainer:
             else:
                 self.optimizer.step()
 
-            # Zero gradients
             self.optimizer.zero_grad()
-            self.loss_scale = 1
+            self.accum_count = 0
 
             # Scheduler step (now runs after each effective batch)
             if self.scheduler is not None:
@@ -362,25 +533,80 @@ class Trainer:
 
         return {"eval_loss": avg_loss}
 
+    def _is_main_process(self) -> bool:
+        """Check if this is the main process (rank 0) for distributed save guard."""
+        try:
+            import torch.distributed as dist
+            if dist.is_initialized():
+                return dist.get_rank() == 0
+        except Exception:
+            pass
+        return True
+
     def save_checkpoint(self, checkpoint_name: str = "checkpoint"):
-        """Save model checkpoint."""
+        """Save model checkpoint, args.json, and update symlinks."""
+        if not self._is_main_process():
+            return
+
         checkpoint_path = self.output_dir / f"{checkpoint_name}.pt"
 
+        import hedgehog
         checkpoint = {
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict() if self.optimizer else None,
             "scheduler_state_dict": self.scheduler.state_dict() if self.scheduler else None,
             "global_step": self.global_step,
             "epoch": self.epoch,
-            "config": self.config.__dict__ if hasattr(self.config, '__dict__') else {},
+            "config": self.config.to_dict(),
+            "hedgehog_version": hedgehog.__version__,
         }
 
         torch.save(checkpoint, checkpoint_path)
+
+        args_path = self.output_dir / "args.json"
+        self.config.to_json(str(args_path))
+
+        self._update_symlink("last", checkpoint_path)
+
         logger.info(f"Saved checkpoint to {checkpoint_path}")
 
-    def load_checkpoint(self, checkpoint_path: str):
-        """Load model checkpoint."""
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        self._cleanup_checkpoints()
+
+    def _update_symlink(self, name: str, target: Path):
+        """Create or update a symlink in output_dir pointing to target."""
+        link_path = self.output_dir / f"{name}.pt"
+        try:
+            if link_path.is_symlink() or link_path.exists():
+                link_path.unlink()
+            link_path.symlink_to(target.name)
+        except OSError:
+            pass
+
+    def _cleanup_checkpoints(self):
+        """Remove old checkpoints beyond save_total_limit."""
+        if self.config.save_total_limit <= 0:
+            return
+        checkpoints = sorted(
+            self.output_dir.glob("checkpoint-*.pt"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        while len(checkpoints) > self.config.save_total_limit:
+            oldest = checkpoints.pop(0)
+            oldest.unlink()
+            logger.info(f"Removed old checkpoint: {oldest}")
+
+    def load_checkpoint(self, checkpoint_path: str, load_args: bool = False,
+                        selective: bool = False, load_data_args: bool = False):
+        """Load model checkpoint and optionally restore config.
+
+        Args:
+            checkpoint_path: Path to .pt checkpoint file.
+            load_args: If True, restore config from checkpoint.
+            selective: If True, use tiered key loading (force/load/data keys).
+                       If False (default), restore all config keys.
+            load_data_args: Only used when selective=True. Load data-related keys.
+        """
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
 
         self.model.load_state_dict(checkpoint["model_state_dict"])
 
@@ -393,14 +619,33 @@ class Trainer:
         self.global_step = checkpoint.get("global_step", 0)
         self.epoch = checkpoint.get("epoch", 0)
 
+        if load_args:
+            saved_config = checkpoint.get("config")
+            if not saved_config:
+                checkpoint_dir = Path(checkpoint_path).parent
+                args_path = checkpoint_dir / "args.json"
+                if args_path.exists():
+                    saved_config = json.loads(args_path.read_text())
+
+            if saved_config:
+                if selective:
+                    self.config = self.config.selective_merge(
+                        saved_config, load_data_args=load_data_args,
+                    )
+                else:
+                    self.config = TrainerConfig.from_dict(saved_config)
+
         logger.info(f"Loaded checkpoint from {checkpoint_path}")
 
     def train(self):
         """Main training loop."""
         logger.info("Starting training...")
 
-        # Setup training
         self.setup_training()
+
+        if self.config.resume_from_checkpoint:
+            self.load_checkpoint(self.config.resume_from_checkpoint)
+            logger.info(f"Resumed from checkpoint: {self.config.resume_from_checkpoint}")
 
         if self.train_dataset is None:
             raise ValueError("train_dataset must be provided")
@@ -433,10 +678,10 @@ class Trainer:
                     eval_metrics = self.evaluation()
                     logger.info(f"Eval: {eval_metrics}")
 
-                    # Save best model
                     if eval_metrics.get("eval_loss", float('inf')) < self.best_metric:
                         self.best_metric = eval_metrics["eval_loss"]
                         self.save_checkpoint("best_model")
+                        self._update_symlink("best", self.output_dir / "best_model.pt")
 
                 # Checkpointing
                 if self.global_step % self.config.save_steps == 0:
