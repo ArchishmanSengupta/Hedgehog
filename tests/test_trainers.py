@@ -221,10 +221,9 @@ class TestTrainer:
             "input_ids": torch.randint(0, 100, (2, 32)),
         }
 
-        # First accumulation step - should not update optimizer
-        initial_loss_scale = trainer.loss_scale
+        initial_accum = trainer.accum_count
         metrics = trainer.training_step(batch)
-        assert trainer.loss_scale == initial_loss_scale + 1
+        assert trainer.accum_count == initial_accum + 1
 
 
 class TestDiffusionTrainer:
@@ -337,6 +336,165 @@ class TestLRScheduler:
         trainer.setup_training()
 
         assert trainer.scheduler is not None
+
+
+class TestTrainerEdgeCases:
+    """Test Trainer edge cases."""
+
+    @pytest.mark.parametrize("vocab_size", [50, 100, 500, 1000])
+    def test_different_vocab_sizes(self, vocab_size):
+        config = TrainerConfig(
+            model_type="dit",
+            vocab_size=vocab_size,
+            hidden_size=64,
+            num_heads=2,
+            num_layers=1,
+            max_seq_len=32,
+            device="cpu",
+            gradient_accumulation_steps=1,
+        )
+        model = create_model(
+            model_type="dit",
+            vocab_size=vocab_size,
+            hidden_size=64,
+            num_heads=2,
+            num_layers=1,
+            max_seq_len=32,
+        )
+        dataset = DummyDataset(num_samples=10, seq_len=32, vocab_size=vocab_size)
+
+        trainer = Trainer(config=config, model=model, train_dataset=dataset)
+        trainer.setup_training()
+
+        batch = {
+            "input_ids": torch.randint(0, vocab_size, (2, 32)),
+        }
+
+        metrics = trainer.training_step(batch)
+        assert "loss" in metrics
+
+    @pytest.mark.parametrize("gradient_accumulation_steps", [1, 2, 4, 8])
+    def test_gradient_accumulation_steps(self, gradient_accumulation_steps):
+        config = TrainerConfig(
+            model_type="dit",
+            vocab_size=100,
+            hidden_size=64,
+            num_heads=2,
+            num_layers=1,
+            max_seq_len=32,
+            device="cpu",
+            gradient_accumulation_steps=gradient_accumulation_steps,
+        )
+        model = create_model(
+            model_type="dit",
+            vocab_size=100,
+            hidden_size=64,
+            num_heads=2,
+            num_layers=1,
+            max_seq_len=32,
+        )
+        dataset = DummyDataset(num_samples=10, seq_len=32, vocab_size=100)
+
+        trainer = Trainer(config=config, model=model, train_dataset=dataset)
+        trainer.setup_training()
+
+        batch = {
+            "input_ids": torch.randint(0, 100, (2, 32)),
+        }
+
+        # Do multiple steps
+        for _ in range(gradient_accumulation_steps + 1):
+            trainer.training_step(batch)
+
+    @pytest.mark.parametrize("batch_size", [1, 2, 4, 8])
+    def test_different_batch_sizes(self, batch_size):
+        config = TrainerConfig(
+            model_type="dit",
+            vocab_size=100,
+            hidden_size=64,
+            num_heads=2,
+            num_layers=1,
+            max_seq_len=32,
+            device="cpu",
+            gradient_accumulation_steps=1,
+        )
+        model = create_model(
+            model_type="dit",
+            vocab_size=100,
+            hidden_size=64,
+            num_heads=2,
+            num_layers=1,
+            max_seq_len=32,
+        )
+        dataset = DummyDataset(num_samples=10, seq_len=32, vocab_size=100)
+
+        trainer = Trainer(config=config, model=model, train_dataset=dataset)
+        trainer.setup_training()
+
+        batch = {
+            "input_ids": torch.randint(0, 100, (batch_size, 32)),
+        }
+
+        metrics = trainer.training_step(batch)
+        assert "loss" in metrics
+
+
+class TestDiffusionTrainerEdgeCases:
+    """Test DiffusionTrainer edge cases."""
+
+    @pytest.mark.parametrize("num_samples", [1, 2, 4, 8])
+    def test_sample_different_num_samples(self, num_samples):
+        config = TrainerConfig(
+            model_type="dit",
+            vocab_size=100,
+            hidden_size=64,
+            num_heads=2,
+            num_layers=1,
+            max_seq_len=32,
+            device="cpu",
+        )
+        model = create_model(
+            model_type="dit",
+            vocab_size=100,
+            hidden_size=64,
+            num_heads=2,
+            num_layers=1,
+            max_seq_len=32,
+        )
+        dataset = DummyDataset(num_samples=10, seq_len=32, vocab_size=100)
+
+        trainer = DiffusionTrainer(config=config, model=model, train_dataset=dataset)
+        trainer.setup_training()
+
+        samples = trainer.sample(num_samples=num_samples, seq_len=16)
+        assert samples.shape[0] == num_samples
+
+    @pytest.mark.parametrize("seq_len", [8, 16, 32])
+    def test_sample_different_seq_lens(self, seq_len):
+        config = TrainerConfig(
+            model_type="dit",
+            vocab_size=100,
+            hidden_size=64,
+            num_heads=2,
+            num_layers=1,
+            max_seq_len=32,
+            device="cpu",
+        )
+        model = create_model(
+            model_type="dit",
+            vocab_size=100,
+            hidden_size=64,
+            num_heads=2,
+            num_layers=1,
+            max_seq_len=32,
+        )
+        dataset = DummyDataset(num_samples=10, seq_len=32, vocab_size=100)
+
+        trainer = DiffusionTrainer(config=config, model=model, train_dataset=dataset)
+        trainer.setup_training()
+
+        samples = trainer.sample(num_samples=2, seq_len=seq_len)
+        assert samples.shape == (2, seq_len)
 
 
 if __name__ == "__main__":
