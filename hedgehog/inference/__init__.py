@@ -19,13 +19,15 @@ import asyncio
 @dataclass
 class InferenceConfig:
     """Configuration for inference."""
-    backend: str = "transformers"  # transformers, vllm, sglang, lmdeploy
+    backend: str = "transformers"
+    model_name_or_path: Optional[str] = None
     max_model_len: int = 4096
     max_num_seqs: int = 256
-    dtype: str = "auto"  # auto, float16, bfloat16, float32
+    dtype: str = "auto"
     tensor_parallel_size: int = 1
     gpu_memory_utilization: float = 0.9
     enforce_eager: bool = False
+    vocab_size: int = 32768
 
 
 class InferenceBackend(ABC):
@@ -99,16 +101,13 @@ class TransformersBackend(InferenceBackend):
         if isinstance(prompts, str):
             prompts = [prompts]
 
-        # Tokenize
         if self.tokenizer:
             inputs = self.tokenizer(prompts, return_tensors="pt", padding=True)
             input_ids = inputs["input_ids"]
-            attention_mask = inputs["attention_mask"]
+            attention_mask = inputs.get("attention_mask")
         else:
-            # Simple tokenization fallback
-            input_ids = torch.randint(0, 1000, (len(prompts), 50))
+            raise ValueError("Tokenizer is required for generation. Provide a tokenizer when creating the backend.")
 
-        # Move to device
         device = next(self.model.parameters()).device
         input_ids = input_ids.to(device)
         if attention_mask is not None:
@@ -144,7 +143,7 @@ class TransformersBackend(InferenceBackend):
         """Encode prompts."""
         if self.tokenizer:
             return self.tokenizer(prompts, return_tensors="pt")["input_ids"]
-        return torch.randint(0, 1000, (len(prompts) if isinstance(prompts, list) else 1, 50))
+        raise ValueError("Tokenizer is required for encoding.")
 
     def decode(self, token_ids: torch.Tensor) -> List[str]:
         """Decode token IDs."""
@@ -167,16 +166,20 @@ class VLLMBackend(InferenceBackend):
             self.SamplingParams = SamplingParams
             self._init_vllm()
         except ImportError:
-            print("vLLM not installed. Falling back to transformers backend.")
-            self._fallback = TransformersBackend(model, config, tokenizer)
+            raise ImportError(
+                "vLLM is required for the vllm backend. "
+                "Install with: pip install vllm  (or: pip install hedgehog-dlm[infer])"
+            )
 
     def _init_vllm(self):
         """Initialize vLLM engine."""
         try:
             from vllm import LLM
 
+            if self.config.model_name_or_path is None:
+                raise ValueError("model_name_or_path is required for vLLM backend")
             self.llm = LLM(
-                model=self.config.model_name_or_path if hasattr(self.config, 'model_name_or_path') else "gpt2",
+                model=self.config.model_name_or_path,
                 tensor_parallel_size=self.config.tensor_parallel_size,
                 gpu_memory_utilization=self.config.gpu_memory_utilization,
                 max_model_len=self.config.max_model_len,
@@ -241,7 +244,7 @@ class VLLMBackend(InferenceBackend):
         """Encode prompts."""
         if self.tokenizer:
             return self.tokenizer(prompts, return_tensors="pt")["input_ids"]
-        return torch.randint(0, 1000, (len(prompts) if isinstance(prompts, list) else 1, 50))
+        raise ValueError("Tokenizer is required for encoding.")
 
     def decode(self, token_ids: torch.Tensor) -> List[str]:
         """Decode token IDs."""
@@ -268,8 +271,10 @@ class SGLangBackend(InferenceBackend):
 
             self.client = sgl
         except ImportError:
-            print("SGLang not installed. Falling back to transformers backend.")
-            self._fallback = TransformersBackend(self.model, self.config, self.tokenizer)
+            raise ImportError(
+                "SGLang is required for the sglang backend. "
+                "Install with: pip install sglang  (or: pip install hedgehog-dlm[infer])"
+            )
 
     def generate(
         self,
@@ -299,7 +304,7 @@ class SGLangBackend(InferenceBackend):
         """Encode prompts."""
         if self.tokenizer:
             return self.tokenizer(prompts, return_tensors="pt")["input_ids"]
-        return torch.randint(0, 1000, (len(prompts) if isinstance(prompts, list) else 1, 50))
+        raise ValueError("Tokenizer is required for encoding.")
 
     def decode(self, token_ids: torch.Tensor) -> List[str]:
         """Decode token IDs."""
@@ -329,13 +334,17 @@ class LMDeployBackend(InferenceBackend):
                 session_len=self.config.max_model_len,
                 max_num_seqs=self.config.max_num_seqs,
             )
+            if self.config.model_name_or_path is None:
+                raise ValueError("model_name_or_path is required for LMDeploy backend")
             self.pipeline = pipeline(
-                self.config.model_name_or_path if hasattr(self.config, 'model_name_or_path') else "gpt2",
+                self.config.model_name_or_path,
                 engine_config=engine_config,
             )
         except ImportError:
-            print("LMDeploy not installed. Falling back to transformers backend.")
-            self._fallback = TransformersBackend(self.model, self.config, self.tokenizer)
+            raise ImportError(
+                "LMDeploy is required for the lmdeploy backend. "
+                "Install with: pip install lmdeploy  (or: pip install hedgehog-dlm[infer])"
+            )
 
     def generate(
         self,
@@ -378,7 +387,7 @@ class LMDeployBackend(InferenceBackend):
         """Encode prompts."""
         if self.tokenizer:
             return self.tokenizer(prompts, return_tensors="pt")["input_ids"]
-        return torch.randint(0, 1000, (len(prompts) if isinstance(prompts, list) else 1, 50))
+        raise ValueError("Tokenizer is required for encoding.")
 
     def decode(self, token_ids: torch.Tensor) -> List[str]:
         """Decode token IDs."""
@@ -477,13 +486,23 @@ class OpenAICompatibleServer:
             self.app = app
 
         except ImportError:
-            print("FastAPI not installed. API server not available.")
+            raise ImportError(
+                "FastAPI and pydantic are required for the API server. "
+                "Install with: pip install fastapi pydantic"
+            )
 
     def run(self):
         """Run the server."""
         if self.app is None:
-            print("Server not initialized. Install FastAPI to enable.")
-            return
+            raise RuntimeError(
+                "Server not initialized. Install FastAPI to enable: pip install fastapi pydantic"
+            )
 
-        import uvicorn
+        try:
+            import uvicorn
+        except ImportError:
+            raise ImportError(
+                "uvicorn is required to run the API server. "
+                "Install with: pip install uvicorn"
+            )
         uvicorn.run(self.app, host=self.host, port=self.port)
