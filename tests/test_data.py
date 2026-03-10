@@ -22,8 +22,7 @@ class MockTokenizer:
         self.bos_token_id = 2
         self.mask_token_id = 3
 
-    def __call__(self, text, max_length=512, padding="max_length", truncation=True, return_tensors="pt"):
-        # Simple mock implementation
+    def __call__(self, text, max_length=512, padding="max_length", truncation=True, return_tensors="pt", add_special_tokens=True):
         if isinstance(text, str):
             text = [text]
         ids = [[i % self.vocab_size for i in range(len(t))] for t in text]
@@ -187,6 +186,65 @@ class TestStreamingDataset:
         )
         item = dataset[0]
         assert "input_ids" in item
+
+
+class TestTextDatasetEdgeCases:
+    """Test TextDataset edge cases."""
+
+    @pytest.mark.parametrize("max_length", [8, 16, 32, 64, 128])
+    def test_different_max_lengths(self, max_length):
+        tokenizer = MockTokenizer()
+        texts = ["hello world test"]
+        dataset = TextDataset(texts=texts, tokenizer=tokenizer, max_length=max_length)
+        item = dataset[0]
+        assert item["input_ids"].shape[0] == max_length
+
+    def test_empty_text_list(self):
+        tokenizer = MockTokenizer()
+        texts = []
+        dataset = TextDataset(texts=texts, tokenizer=tokenizer, max_length=32)
+        assert len(dataset) == 0
+
+    @pytest.mark.parametrize("num_texts", [1, 5, 10, 20])
+    def test_different_num_texts(self, num_texts):
+        tokenizer = MockTokenizer()
+        texts = [f"text {i}" for i in range(num_texts)]
+        dataset = TextDataset(texts=texts, tokenizer=tokenizer, max_length=32)
+        assert len(dataset) == num_texts
+
+
+class TestCharacterDatasetEdgeCases:
+    """Test CharacterDataset edge cases."""
+
+    @pytest.mark.parametrize("max_length", [8, 16, 32, 64])
+    def test_different_max_lengths(self, max_length):
+        texts = ["hello"]
+        dataset = CharacterDataset(texts=texts, max_length=max_length)
+        item = dataset[0]
+        assert item["input_ids"].shape[0] == max_length
+
+    @pytest.mark.parametrize("text_len", [1, 5, 10, 50])
+    def test_different_text_lengths(self, text_len):
+        text = "a" * text_len
+        texts = [text]
+        dataset = CharacterDataset(texts=texts, max_length=100)
+        item = dataset[0]
+        # Should have at least text_len tokens (padded to max_length)
+        assert item["input_ids"].shape[0] == 100
+
+
+class TestTokenizerWrapperEdgeCases:
+    """Test TokenizerWrapper edge cases."""
+
+    def test_wrapper_with_special_tokens(self):
+        tokenizer = MockTokenizer()
+        wrapper = TokenizerWrapper(tokenizer)
+        # Test various input types
+        result = wrapper("test")
+        assert "input_ids" in result
+
+        result = wrapper(["test1", "test2"])
+        assert "input_ids" in result
 
 
 if __name__ == "__main__":
