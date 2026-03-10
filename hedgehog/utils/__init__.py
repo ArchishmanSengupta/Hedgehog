@@ -17,7 +17,9 @@ def setup_logging(
     logger = logging.getLogger("hedgehog")
     logger.setLevel(getattr(logging, log_level.upper()))
 
-    # Console handler
+    if logger.handlers:
+        return logger
+
     console_handler = logging.StreamHandler()
     console_handler.setLevel(getattr(logging, log_level.upper()))
     formatter = logging.Formatter(
@@ -26,7 +28,6 @@ def setup_logging(
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)
 
-    # File handler
     if log_file:
         file_handler = logging.FileHandler(log_file)
         file_handler.setLevel(getattr(logging, log_level.upper()))
@@ -117,7 +118,7 @@ def safe_load_checkpoint(
     device: Optional[torch.device] = None,
 ) -> dict:
     """Safely load checkpoint."""
-    return torch.load(checkpoint_path, map_location=device)
+    return torch.load(checkpoint_path, map_location=device, weights_only=False)
 
 
 def find_free_port() -> int:
