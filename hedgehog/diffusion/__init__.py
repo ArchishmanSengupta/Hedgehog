@@ -10,14 +10,21 @@ Based on research from:
 import torch
 import torch.nn as nn
 import math
+import logging
 from typing import Optional, Tuple
 from enum import Enum
+
+logger = logging.getLogger(__name__)
+
+COSINE_SCHEDULE_OFFSET = 0.008
+SINUSOIDAL_BASE_FREQ = 10000.0
 
 
 class DiffusionType(Enum):
     """Supported diffusion types."""
     D3PM_ABSORBING = "d3pm_absorbing"  # Mask tokens during diffusion
     D3PM_UNIFORM = "d3pm_uniform"        # Uniform noise
+    MDLM_ABSORBING = "mdlm_absorbing"  # MDLM with absorbing
     MDLM_SUBS = "mdlm_subs"              # Substitution-based (MDLM)
     SEDD = "sedd"                        # Score Entropy
 
@@ -41,7 +48,7 @@ class NoiseSchedule:
             return 1 - t / self.num_timesteps
         elif self.schedule == "cosine":
             # Cosine schedule from improved ddpm
-            s = 0.008
+            s = COSINE_SCHEDULE_OFFSET
             t = t / self.num_timesteps
             return torch.cos((t + s) / (1 + s) * math.pi / 2) ** 2
         elif self.schedule == "quadratic":
@@ -104,9 +111,9 @@ class DiscreteDiffusion:
         # Set probability for original tokens
         probs = probs + one_hot * alpha_expanded
 
-        # Add mask token probability
+        # Add mask token probability (additive to handle case where x_0 == mask_token_id)
         mask_prob = (1 - alpha_bar).unsqueeze(1)  # [batch, 1]
-        probs[:, :, mask_token_id] = mask_prob
+        probs[:, :, mask_token_id] = probs[:, :, mask_token_id] + mask_prob
 
         # Normalize probabilities to sum to 1
         probs = probs / probs.sum(dim=-1, keepdim=True).clamp(min=1e-8)
@@ -173,6 +180,10 @@ class MDLMDiffusion(DiscreteDiffusion):
             schedule=schedule,
         )
 
+    def get_alpha_bar(self, t: int) -> float:
+        """Get cumulative noise level at timestep t."""
+        return self.noise_schedule.get_alpha_bar(torch.tensor(t, dtype=torch.float32)).item()
+
     def compute_loss(
         self,
         model: nn.Module,
@@ -188,7 +199,6 @@ class MDLMDiffusion(DiscreteDiffusion):
         # Forward diffusion
         x_t, mask = self.q_sample(x_0, t, mask_token_id)
 
-        # Get model predictions
         logits = model(x_t, timesteps=t)
 
         # Compute loss only on masked positions
@@ -197,6 +207,16 @@ class MDLMDiffusion(DiscreteDiffusion):
         loss = (loss * mask.view(-1)).sum() / mask.sum().clamp(min=1)
 
         return loss
+
+    def __call__(
+        self,
+        x_0: torch.Tensor,
+        t: torch.Tensor,
+        mask_token_id: int,
+    ) -> torch.Tensor:
+        """Forward pass - alias for q_sample."""
+        x_t, _ = self.q_sample(x_0, t, mask_token_id)
+        return x_t
 
 
 class D3PMDiffusion(DiscreteDiffusion):
@@ -212,29 +232,27 @@ class D3PMDiffusion(DiscreteDiffusion):
         diffusion_type: DiffusionType = DiffusionType.D3PM_ABSORBING,
         num_timesteps: int = 1000,
         schedule: str = "linear",
-        q_type: str = "absorbing",
+        transition_type: str = "absorbing",
     ):
         super().__init__(vocab_size, diffusion_type, num_timesteps, schedule)
-        self.q_type = q_type
+        self.transition_type = transition_type
         self._init_transition_matrix()
 
     def _init_transition_matrix(self):
-        """Initialize transition matrix Q_t."""
-        # Q_t[i,j] = probability of transitioning from state i to state j
-        if self.q_type == "absorbing":
-            # Absorbing state (mask) stays mask, others mix uniformly
-            self.Q = torch.zeros(self.num_timesteps, self.vocab_size, self.vocab_size)
-            for t in range(self.num_timesteps):
-                beta = t / self.num_timesteps
-                self.Q[t] = torch.eye(self.vocab_size) * (1 - beta)
-                self.Q[t, :, self.vocab_size - 1] += beta  # mask token absorbs
-        elif self.q_type == "uniform":
-            # Uniform random noise
-            self.Q = torch.zeros(self.num_timesteps, self.vocab_size, self.vocab_size)
-            for t in range(self.num_timesteps):
-                beta = t / self.num_timesteps
-                self.Q[t] = torch.full((self.vocab_size, self.vocab_size), beta / self.vocab_size)
-                self.Q[t] += torch.eye(self.vocab_size) * (1 - beta)
+        """Initialize transition matrix parameters (computed on-the-fly to save memory)."""
+        pass
+
+    def _get_transition_probs(self, token_id: int, t: int) -> torch.Tensor:
+        """Get transition probabilities for a single token at timestep t."""
+        beta = t / self.num_timesteps
+        probs = torch.zeros(self.vocab_size)
+        if self.transition_type == "absorbing":
+            probs[token_id] = 1 - beta
+            probs[self.vocab_size - 1] += beta
+        elif self.transition_type == "uniform":
+            probs.fill_(beta / self.vocab_size)
+            probs[token_id] += (1 - beta)
+        return probs
 
     def q_sample(
         self,
@@ -250,12 +268,10 @@ class D3PMDiffusion(DiscreteDiffusion):
         mask = torch.zeros_like(x_t, dtype=torch.bool)
 
         for i in range(batch_size):
-            t_i = t[i].item()
-            Q_t = self.Q[t_i].to(device)
-
+            t_i = int(t[i].item())
             for j in range(seq_len):
-                probs = Q_t[x_t[i, j]]
-                x_t[i, j] = torch.multinomial(probs, 1).item()
+                probs = self._get_transition_probs(int(x_t[i, j].item()), t_i).to(device)
+                x_t[i, j] = torch.multinomial(probs.unsqueeze(0), 1).item()
                 mask[i, j] = (x_t[i, j] == mask_token_id)
 
         return x_t, mask
@@ -270,17 +286,22 @@ def create_diffusion(
     """Factory function to create diffusion processes."""
     diffusion_map = {
         "mdlm": MDLMDiffusion,
-        "d3pm": MDLMDiffusion,  # d3pm defaults to mdlm-style for simplicity
+        "d3pm": MDLMDiffusion,
         "d3pm_absorbing": lambda vs, nt, sc: D3PMDiffusion(
             vs, DiffusionType.D3PM_ABSORBING, nt, sc, "absorbing"
         ),
         "d3pm_uniform": lambda vs, nt, sc: D3PMDiffusion(
             vs, DiffusionType.D3PM_UNIFORM, nt, sc, "uniform"
         ),
-        "sedd": MDLMDiffusion,  # SEDD uses same process as MDLM
+        "sedd": MDLMDiffusion,
     }
 
     if diffusion_type not in diffusion_map:
         raise ValueError(f"Unknown diffusion type: {diffusion_type}. Available: {list(diffusion_map.keys())}")
+
+    if diffusion_type == "d3pm":
+        logger.warning("diffusion_type='d3pm' uses MDLM implementation. Use 'd3pm_absorbing' or 'd3pm_uniform' for true D3PM.")
+    elif diffusion_type == "sedd":
+        logger.warning("diffusion_type='sedd' uses MDLM implementation. Full SEDD is not yet implemented.")
 
     return diffusion_map[diffusion_type](vocab_size, num_timesteps, schedule)
