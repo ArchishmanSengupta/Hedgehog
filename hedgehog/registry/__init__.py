@@ -180,7 +180,10 @@ class ModelRegistry:
         try:
             from transformers import AutoModelForCausalLM, AutoTokenizer
         except ImportError:
-            raise ImportError("transformers is required to load models from Hub")
+            raise ImportError(
+                "The 'transformers' package is required to load models from HuggingFace Hub. "
+                "Install with: pip install transformers"
+            )
 
         # Determine model class
         if model_type == "ar" or "gpt" in model_path.lower():
