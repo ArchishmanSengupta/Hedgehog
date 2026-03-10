@@ -15,6 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass
+from abc import abstractmethod
 import numpy as np
 
 
@@ -36,8 +37,17 @@ class QuantizedLinear(nn.Module):
         self.base_layer = base_layer
         self.config = config
 
+    @property
+    def weight(self):
+        return self.base_layer.weight
+
+    @property
+    def bias(self):
+        return self.base_layer.bias
+
+    @abstractmethod
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
+        pass
 
 
 class BNBQuantizedLinear(QuantizedLinear):
