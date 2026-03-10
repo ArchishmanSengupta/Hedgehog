@@ -118,6 +118,11 @@ class CharacterDataset(Dataset):
     def __len__(self) -> int:
         return len(self.texts)
 
+    @property
+    def vocab_size(self) -> int:
+        """Return the vocabulary size."""
+        return len(self.char_to_id)
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         return {
             "input_ids": self.encodings[idx],
@@ -143,9 +148,14 @@ class HuggingFaceDataset(Dataset):
             text_column: Name of text column
             tokenizer: Tokenizer for processing (required for proper dataset)
         """
-        from datasets import load_dataset
+        try:
+            from datasets import load_dataset
+        except ImportError:
+            raise ImportError(
+                "The 'datasets' package is required for HuggingFace datasets. "
+                "Install with: pip install datasets"
+            )
 
-        # Load the dataset
         self.dataset = load_dataset(dataset_path, split=split)
         self.max_length = max_length
         self.text_column = text_column
