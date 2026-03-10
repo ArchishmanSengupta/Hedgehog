@@ -87,9 +87,10 @@ class DDPMCachedSampler(Sampler):
     This is 3-4x faster than standard DDPM.
     """
 
-    def __init__(self, *args, cache_predictions: bool = True, **kwargs):
+    def __init__(self, *args, num_cache_steps: int = 50, max_cache_size: int = 5, **kwargs):
         super().__init__(*args, **kwargs)
-        self.cache_predictions = cache_predictions
+        self.num_cache_steps = num_cache_steps
+        self.max_cache_size = max_cache_size
 
     def sample(
         self,
@@ -97,11 +98,10 @@ class DDPMCachedSampler(Sampler):
         seq_len: int,
         device: torch.device,
     ) -> torch.Tensor:
-        """Generate samples using cached DDPM."""
+        """Generate samples using cached DDPM with stride."""
         num_timesteps = self.diffusion.num_timesteps
-        timesteps = torch.arange(num_timesteps, device=device).unsqueeze(0).expand(num_samples, -1)
+        cache_stride = max(1, num_timesteps // self.num_cache_steps)
 
-        # Start from fully masked
         x_t = torch.full(
             (num_samples, seq_len),
             self.mask_token_id,
@@ -109,27 +109,27 @@ class DDPMCachedSampler(Sampler):
             device=device,
         )
 
-        # Forward pass through model to get all predictions at once
-        # This is more efficient than calling model for each timestep
+        cached_logits = {}
+
         with torch.no_grad():
-            # Reshape for batched timestep processing
-            x_flat = x_t.unsqueeze(1).expand(-1, num_timesteps, -1).reshape(-1, seq_len)
-            t_flat = timesteps.reshape(-1)
+            for t in reversed(range(num_timesteps)):
+                cache_key = t // cache_stride
+                if cache_key not in cached_logits:
+                    logits = self.model(
+                        x_t, timesteps=torch.full((num_samples,), t, device=device)
+                    )
+                    cached_logits[cache_key] = logits
+                else:
+                    logits = cached_logits[cache_key]
 
-            # Get predictions for all timesteps
-            all_logits = self.model(x_flat, timesteps=t_flat)
-            all_probs = torch.softmax(all_logits, dim=-1)
+                probs = torch.softmax(logits, dim=-1)
+                x_t = torch.multinomial(
+                    probs.reshape(-1, self.vocab_size), 1
+                ).reshape(num_samples, seq_len)
 
-            # Reshape back
-            all_probs = all_probs.reshape(num_samples, num_timesteps, seq_len, self.vocab_size)
-
-        # Iterative denoising
-        for t in reversed(range(num_timesteps)):
-            # Use cached predictions
-            probs = all_probs[:, t]
-
-            # Sample from distribution
-            x_t = torch.multinomial(probs.reshape(-1, self.vocab_size), 1).reshape(num_samples, seq_len)
+                if len(cached_logits) > self.max_cache_size:
+                    oldest = min(cached_logits.keys())
+                    del cached_logits[oldest]
 
         return x_t
 
