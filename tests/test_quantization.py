@@ -84,5 +84,65 @@ class TestQuantizeModel:
             assert quantized is not None
 
 
+class TestQuantConfigEdgeCases:
+    """Test QuantConfig edge cases."""
+
+    @pytest.mark.parametrize("bits", [2, 3, 4, 8, 16])
+    def test_different_bits(self, bits):
+        config = QuantConfig(bits=bits)
+        assert config.bits == bits
+
+    @pytest.mark.parametrize("group_size", [32, 64, 128, 256])
+    def test_different_group_sizes(self, group_size):
+        config = QuantConfig(group_size=group_size)
+        assert config.group_size == group_size
+
+    @pytest.mark.parametrize("quant_type", ["bnb", "awq", "gptq", "hqq", "eetq"])
+    def test_different_quant_types(self, quant_type):
+        config = QuantConfig(quant_type=quant_type)
+        assert config.quant_type == quant_type
+
+
+class TestBNBQuantizedLinearEdgeCases:
+    """Test BNBQuantizedLinear edge cases."""
+
+    @pytest.mark.parametrize("bits", [4, 8])
+    def test_different_bits(self, bits):
+        linear = nn.Linear(128, 256)
+        quantized = BNBQuantizedLinear(linear, bits=bits)
+        assert quantized.bits == bits
+
+    @pytest.mark.parametrize("in_features,out_features", [
+        (64, 64), (128, 256), (256, 512), (512, 128)
+    ])
+    def test_different_dimensions(self, in_features, out_features):
+        linear = nn.Linear(in_features, out_features)
+        quantized = BNBQuantizedLinear(linear, bits=4)
+        assert quantized.in_features == in_features
+        assert quantized.out_features == out_features
+
+
+class TestQuantizeModelEdgeCases:
+    """Test quantize_model edge cases."""
+
+    def test_quantize_deep_model(self):
+        model = nn.Sequential(
+            nn.Linear(128, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Linear(128, 64),
+        )
+        config = QuantConfig(quant_type="bnb", bits=4)
+        quantized = quantize_model(model, config)
+        assert quantized is not None
+
+    def test_quantize_model_with_bias(self):
+        model = nn.Linear(128, 256, bias=True)
+        config = QuantConfig(quant_type="bnb", bits=4)
+        quantized = quantize_model(model, config)
+        assert quantized is not None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
